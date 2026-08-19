@@ -25,4 +25,16 @@ Following pre-analysis, write a comprehensive migration plan allowing the Fabric
 
 # Plan evaluation
 
-TODO
+## Ingress controller looks to be a pre-requisites rather than a component to install by the Fabric Ansible Collections
+
+From the MIGRATION-PLAN.md, first step require either an ingress (either nginx either Gateway API) installation from `roles/fabric_operator_crds/tasks/k8s/create.yml`, but that task doesn't handle such ingress install before the migration. We should not change the tasks behavior along the migration. Can you re-analyse the Fabric Ansible Collection project and explicit in the PRE-ANALYSIS.md it the project provide a way to install the ingress nginx controller or if this is handled as a pre-requisite ? 
+
+---
+
+In the PRE-ANALYSIS.md there is following statement: 
+
+`The fabric-ansible-collection currently provisions ingress-nginx (controller-v1.1.2) as the sole Kubernetes ingress solution.` 
+
+This is not entirely correct : ingress-nginx is a pre-requirement of the fabric ansible collection and the project provision the ingress-nginx for the CI github requirement. 
+
+Can you hunt and correct any statement making think the fabric ansible collection handle ingress provisionning ? 

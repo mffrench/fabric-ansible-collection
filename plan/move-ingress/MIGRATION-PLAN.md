@@ -24,6 +24,41 @@
 
 ---
 
+## 1.1 Design constraint: the ingress controller is a prerequisite, not a role task
+
+The `fabric_operator_crds` role **does not install any ingress controller**. This
+is the current, documented, intentional design:
+
+> *"This role does not install an ingress controller."*
+> — `docs/source/roles/fabric-operator-crds.rst`
+
+ingress-nginx is installed exclusively by the CI shell script
+`.github/scripts/kind_with_nginx.sh`, which runs **before** any Ansible playbook
+in the `fvtest.yml` workflow. The CoreDNS wildcard override is also applied by
+that same shell script — the Jinja2 template at
+`roles/fabric_operator_crds/templates/k8s/coredns/coredns.yaml.j2` exists but
+is not wired to any Ansible task.
+
+For end-users on managed cloud clusters (IKS, EKS, GKE), the documentation
+directs them to install and configure a compatible ingress controller manually
+before running any collection playbook.
+
+**This plan preserves that boundary without exception.** The migration
+introduces:
+
+- A new CI bootstrap script `kind_with_envoy_gateway.sh` to replace
+  `kind_with_nginx.sh` for the Gateway API path.
+- Updated prerequisite documentation telling users what to install before
+  using `ingress_type: gateway-api`.
+- **Zero changes** to the task entry points of `fabric_operator_crds`,
+  `fabric_console`, `endorsing_organization`, or `ordering_organization` for
+  gateway controller installation.
+
+Workstreams W2 (Gateway installation templates) and W3 (CoreDNS override) are
+therefore **CI script and documentation work only** — not Ansible role work.
+
+---
+
 ## 2. Port topology
 
 ### 2.1 HLF component default ports
@@ -92,14 +127,13 @@ once the variable abstraction (§5.1) is in place.
 
 | # | Workstream | Scope | Blocking dependency |
 |---|-----------|-------|---------------------|
-| W1 | Variable abstraction + defaults | `fabric_operator_crds` role | None |
-| W2 | Gateway installation task | `fabric_operator_crds` role, new templates | W1 |
-| W3 | CoreDNS override | `fabric_operator_crds` role | W2 |
+| W1 | Variable abstraction + defaults | `fabric_operator_crds` role defaults | None |
+| W2 | CI bootstrap script (Gateway API) | `.github/scripts/` new shell script | None |
+| W3 | CI workflow matrix | `.github/workflows/fvtest.yml` | W2 |
 | W4 | RBAC extension | All cluster role templates | W1 |
 | W5 | Console wait logic | `hlfsupport_console` role | W1 |
-| W6 | CI bootstrap | `.github/scripts/` | W2, W3 |
-| W7 | Route resources (post-operator overlay) | New Ansible tasks | W2, upstream |
-| W8 | Documentation | `docs/` | All |
+| W6 | Route resources (post-operator overlay) | New Ansible role templates + tasks | W2, upstream |
+| W7 | Documentation | `docs/` | All |
 
 ---
 
@@ -123,196 +157,295 @@ ingress_grpc_orderer_port: 7050
 ingress_grpc_peer_port: 7051
 ```
 
-**File:** `roles/fabric_operator_crds/tasks/k8s/create.yml`
-
-Wrap the existing nginx installation block in a condition, and add a new block
-for Gateway API installation:
-
-```yaml
-# [NGINX] Install ingress-nginx (deprecated path)
-- name: Install ingress-nginx controller
-  kubernetes.core.k8s:
-    definition: "{{ lookup('kubernetes.core.kustomize',
-      dir=ingress_nginx_kustomize_ref) }}"
-  when: ingress_type == 'nginx'
-
-# [GW] Install Envoy Gateway
-- name: Install Envoy Gateway
-  kubernetes.core.k8s:
-    definition: "{{ lookup('kubernetes.core.kustomize',
-      dir=envoy_gateway_kustomize_ref) }}"
-  when: ingress_type == 'gateway-api'
-
-# [GW] Apply GatewayClass and Gateway
-- name: Apply fabric GatewayClass and Gateway
-  kubernetes.core.k8s:
-    state: present
-    namespace: "{{ namespace }}"
-    resource_definition: "{{ lookup('template',
-      'templates/k8s/gateway/fabric-gateway.yaml.j2') }}"
-  when: ingress_type == 'gateway-api'
-```
-
-Add the following versioned references to `defaults/main.yml`:
-
-```yaml
-ingress_nginx_kustomize_ref: >-
-  https://github.com/kubernetes/ingress-nginx.git/deploy/static/provider/cloud?ref=controller-v1.1.2
-envoy_gateway_kustomize_ref: >-
-  https://github.com/envoyproxy/gateway.git/charts/gateway-helm?ref=v1.2.0
-```
+These variables are consumed by the route-resource tasks (W6) and the console
+wait-logic task (W5). **`roles/fabric_operator_crds/tasks/k8s/create.yml` is
+not changed by this workstream** — it does not install any ingress controller
+today and will not do so after the migration.
 
 ---
 
-### 5.2 W2 — Gateway installation templates
+### 5.2 W2 — CI bootstrap script (Gateway API)
 
-#### 5.2.1 New file: `roles/fabric_operator_crds/templates/k8s/gateway/`
+The ingress-nginx controller is currently installed by
+`.github/scripts/kind_with_nginx.sh` before any Ansible playbook runs. The
+Gateway API equivalent is a new parallel script. **The existing
+`kind_with_nginx.sh` is not modified.**
 
-Create the directory and the following templates.
+**New file:** `.github/scripts/kind_with_envoy_gateway.sh`
 
-**`roles/fabric_operator_crds/templates/k8s/gateway/fabric-gatewayclass.yaml`**
+```bash
+#!/usr/bin/env bash
+# Sets up a KIND cluster with Envoy Gateway for Gateway API integration tests.
+# Mirrors kind_with_nginx.sh structure. Called from fvtest.yml before any
+# Ansible playbook is executed.
+set -eo pipefail
 
-```yaml
+KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME:-kind}
+KIND_CLUSTER_IMAGE=${KIND_CLUSTER_IMAGE:-kindest/node:v1.29.0}
+KIND_API_SERVER_ADDRESS=${KIND_API_SERVER_ADDRESS:-127.0.0.1}
+KIND_API_SERVER_PORT=${KIND_API_SERVER_PORT:-8888}
+CONTAINER_REGISTRY_NAME=${CONTAINER_REGISTRY_NAME:-kind-registry}
+CONTAINER_REGISTRY_ADDRESS=${CONTAINER_REGISTRY_ADDRESS:-127.0.0.1}
+CONTAINER_REGISTRY_PORT=${CONTAINER_REGISTRY_PORT:-5000}
+ENVOY_GATEWAY_VERSION=${ENVOY_GATEWAY_VERSION:-v1.2.0}
+
+function kind_with_envoy_gateway() {
+  delete_cluster
+  create_cluster
+  install_gateway_api_crds
+  install_envoy_gateway
+  apply_gatewayclass
+  apply_coredns_override
+  launch_docker_registry
+}
+
+function delete_cluster() {
+  kind delete cluster --name "$KIND_CLUSTER_NAME" || true
+}
+
+function create_cluster() {
+  # Three hostPort mappings: 443 (HTTPS), 7050 (orderer gRPC), 7051 (peer gRPC)
+  cat <<EOF | kind create cluster --name "$KIND_CLUSTER_NAME" \
+                                   --image "$KIND_CLUSTER_IMAGE" --config=-
+---
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+      - containerPort: 7050
+        hostPort: 7050
+        protocol: TCP
+      - containerPort: 7051
+        hostPort: 7051
+        protocol: TCP
+networking:
+  apiServerAddress: ${KIND_API_SERVER_ADDRESS}
+  apiServerPort: ${KIND_API_SERVER_PORT}
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:${CONTAINER_REGISTRY_PORT}"]
+    endpoint = ["http://${CONTAINER_REGISTRY_NAME}:${CONTAINER_REGISTRY_PORT}"]
+EOF
+
+  for node in $(kind get nodes --name "$KIND_CLUSTER_NAME"); do
+    docker exec "$node" sysctl net.ipv4.conf.all.route_localnet=1
+  done
+}
+
+function install_gateway_api_crds() {
+  # Experimental channel includes TLSRoute (beta)
+  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/experimental-install.yaml
+  kubectl wait --for condition=established \
+    crd/gateways.gateway.networking.k8s.io \
+    crd/httproutes.gateway.networking.k8s.io \
+    crd/tlsroutes.gateway.networking.k8s.io \
+    --timeout=60s
+}
+
+function install_envoy_gateway() {
+  helm install eg oci://docker.io/envoyproxy/gateway-helm \
+    --version "${ENVOY_GATEWAY_VERSION}" \
+    -n envoy-gateway-system --create-namespace
+  kubectl -n envoy-gateway-system rollout status deploy envoy-gateway \
+    --timeout=120s
+}
+
+function apply_gatewayclass() {
+  # Only the GatewayClass is applied here. The Gateway resource itself is
+  # created by the user's playbook (or by the test playbook), since it carries
+  # namespace and domain variables that are not known at bootstrap time.
+  kubectl apply -f - <<EOF
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
   name: fabric-envoy-gateway
 spec:
   controllerName: gateway.envoyproxy.io/gatewayclass-controller
-```
+EOF
+  kubectl wait --for=condition=Accepted \
+    gatewayclass/fabric-envoy-gateway --timeout=60s
+}
 
-**`roles/fabric_operator_crds/templates/k8s/gateway/fabric-gateway.yaml.j2`**
+function apply_coredns_override() {
+  # Mirror of kind_with_nginx.sh:apply_coredns_override().
+  # Resolves the ClusterIP of the Envoy-provisioned service for the Gateway.
+  # The Gateway must have been created (by the test playbook) before this runs,
+  # so the CI workflow must call apply_coredns_override() after the playbook step,
+  # or poll until the service appears.
+  local CLUSTER_IP=""
+  for i in $(seq 1 30); do
+    CLUSTER_IP=$(kubectl get svc -A \
+      -l "gateway.envoyproxy.io/owning-gateway-name=fabric-gateway" \
+      -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true)
+    [ -n "$CLUSTER_IP" ] && break
+    sleep 5
+  done
 
-```yaml
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
+  cat <<EOF | kubectl apply -f -
+---
+kind: ConfigMap
+apiVersion: v1
 metadata:
-  name: fabric-gateway
-  namespace: "{{ namespace }}"
-spec:
-  gatewayClassName: fabric-envoy-gateway
-  listeners:
-    # ── HTTPS: console, CA, gRPC-Web proxy, operations endpoints ──────────
-    - name: https
-      port: 443
-      protocol: HTTPS
-      hostname: "*.{{ ingress_domain }}"
-      tls:
-        mode: Terminate
-        certificateRefs:
-          - name: "{{ ingress_tls_secret | default('fabric-tls-secret') }}"
-      allowedRoutes:
-        namespaces:
-          from: Same
+  name: coredns
+  namespace: kube-system
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health { lameduck 5s }
+        ready
+        rewrite name regex (.*)\.localho\.st host.ingress.internal
+        hosts {
+          ${CLUSTER_IP} host.ingress.internal
+          fallthrough
+        }
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+           pods insecure
+           fallthrough in-addr.arpa ip6.arpa
+           ttl 30
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf { max_concurrent 1000 }
+        cache 30
+        loop
+        reload
+        loadbalance
+    }
+EOF
+  kubectl -n kube-system rollout restart deployment/coredns
+}
 
-    # ── TLS passthrough: orderer gRPC API (port 7050) ──────────────────────
-    - name: orderer-passthrough
-      port: "{{ ingress_grpc_orderer_port }}"
-      protocol: TLS
-      hostname: "*.{{ ingress_domain }}"
-      tls:
-        mode: Passthrough
-      allowedRoutes:
-        namespaces:
-          from: Same
+function launch_docker_registry() {
+  # Identical to kind_with_nginx.sh:launch_docker_registry()
+  local running
+  running="$(docker inspect -f '{{.State.Running}}' "${CONTAINER_REGISTRY_NAME}" 2>/dev/null || true)"
+  if [ "${running}" != 'true' ]; then
+    docker run --detach --restart always \
+      --name "${CONTAINER_REGISTRY_NAME}" \
+      --publish "${CONTAINER_REGISTRY_ADDRESS}:${CONTAINER_REGISTRY_PORT}:${CONTAINER_REGISTRY_PORT}" \
+      registry:2
+  fi
+  docker network connect "kind" "${CONTAINER_REGISTRY_NAME}" || true
+  cat <<EOF | kubectl apply -f -
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-registry-hosting
+  namespace: kube-public
+data:
+  localRegistryHosting.v1: |
+    host: "localhost:${CONTAINER_REGISTRY_PORT}"
+    help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
+EOF
+}
 
-    # ── TLS passthrough: peer gRPC API (port 7051) ─────────────────────────
-    - name: peer-passthrough
-      port: "{{ ingress_grpc_peer_port }}"
-      protocol: TLS
-      hostname: "*.{{ ingress_domain }}"
-      tls:
-        mode: Passthrough
-      allowedRoutes:
-        namespaces:
-          from: Same
+kind_with_envoy_gateway
+
+mkdir -p _cfg
+kubectl config view --raw > _cfg/k8s_context.yaml
 ```
 
-> **Note on `hostname` in `TLSRoute`:** SNI matching in a passthrough listener
-> uses the `sniHosts` field on the `TLSRoute` resource (see W7), not the Gateway
-> `hostname` field. The `hostname` wildcard on the listener is a pre-filter; the
-> precise backend selection happens in the route.
-
-#### 5.2.2 Wait for Gateway to be programmed
-
-Add to `roles/fabric_operator_crds/tasks/k8s/create.yml`:
-
-```yaml
-- name: Wait for fabric Gateway to be programmed
-  kubernetes.core.k8s_info:
-    api_version: gateway.networking.k8s.io/v1
-    kind: Gateway
-    name: fabric-gateway
-    namespace: "{{ namespace }}"
-  register: gw_info
-  until: >
-    gw_info.resources | length > 0 and
-    (gw_info.resources[0].status.conditions |
-     selectattr('type','equalto','Programmed') |
-     selectattr('status','equalto','True') | list | length) > 0
-  retries: 60
-  delay: 5
-  when: ingress_type == 'gateway-api'
-```
+> **Note on CoreDNS timing:** The CoreDNS override in `kind_with_nginx.sh` can
+> run immediately after nginx starts because nginx has a stable ClusterIP as
+> soon as the controller pod is ready. With Envoy Gateway, the per-Gateway
+> Envoy service is only created *after* a `Gateway` resource is applied (which
+> happens in the user's Ansible playbook). The CI workflow (W3) must therefore
+> split the bootstrap into two phases: (1) cluster + Envoy Gateway install
+> before the playbook, (2) CoreDNS override after the playbook has applied the
+> `Gateway` resource. The `apply_coredns_override()` function above handles this
+> by polling until the service label appears.
 
 ---
 
-### 5.3 W3 — CoreDNS override
+### 5.3 W3 — CI workflow matrix
 
-**File:** `roles/fabric_operator_crds/templates/k8s/coredns/coredns.yaml.j2`
+**File:** `.github/workflows/fvtest.yml`
 
-No structural change required. The template already uses `{{ clusterip }}` as the
-single variable. What changes is the Ansible task that populates it.
-
-**File:** `roles/fabric_operator_crds/tasks/k8s/create.yml`
-
-Replace the single ClusterIP lookup task with a conditional:
+Add a matrix dimension so both ingress paths are exercised. The CoreDNS override
+step is placed **after** the Ansible playbook step for the Gateway API path,
+because the Envoy Gateway service only exists once the `Gateway` resource has
+been created by the playbook.
 
 ```yaml
-# [NGINX] Resolve nginx controller ClusterIP
-- name: Get ingress-nginx controller ClusterIP
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Service
-    name: ingress-nginx-controller
-    namespace: ingress-nginx
-  register: nginx_svc
-  when: ingress_type == 'nginx'
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        ingress_type: [nginx, gateway-api]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.9
+      - uses: BSFishy/pip-action@v1
+        with:
+          requirements: requirements.txt
 
-- name: Set clusterip from nginx service
-  set_fact:
-    clusterip: "{{ nginx_svc.resources[0].spec.clusterIP }}"
-  when: ingress_type == 'nginx'
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1.4.0
+        with:
+          install_only: true
 
-# [GW] Resolve Envoy Gateway LoadBalancer / ClusterIP
-- name: Get Envoy Gateway service ClusterIP
-  kubernetes.core.k8s_info:
-    api_version: v1
-    kind: Service
-    name: envoy-fabric-gateway   # Name follows pattern: envoy-<gateway-name>
-    namespace: "{{ namespace }}"
-  register: envoy_svc
-  when: ingress_type == 'gateway-api'
+      - name: Bootstrap cluster (nginx path)
+        if: matrix.ingress_type == 'nginx'
+        run: |
+          export KIND_API_SERVER_ADDRESS=$(sh .github/scripts/get-host-ip.sh)
+          .github/scripts/kind_with_nginx.sh
+          mkdir -p _cfg
+          kubectl config view --raw | sed "s/127.0.0.1/$KIND_API_SERVER_ADDRESS/g" > _cfg/k8s_context.yaml
+          export TEST_NETWORK_INGRESS_DOMAIN=$(echo $KIND_API_SERVER_ADDRESS | tr -s '.' '-').nip.io
+          echo "console_domain: $TEST_NETWORK_INGRESS_DOMAIN" >> _cfg/domain.yml
 
-- name: Set clusterip from Envoy Gateway service
-  set_fact:
-    clusterip: "{{ envoy_svc.resources[0].spec.clusterIP }}"
-  when: ingress_type == 'gateway-api'
+      - name: Bootstrap cluster (gateway-api path)
+        if: matrix.ingress_type == 'gateway-api'
+        run: |
+          export KIND_API_SERVER_ADDRESS=$(sh .github/scripts/get-host-ip.sh)
+          .github/scripts/kind_with_envoy_gateway.sh
+          mkdir -p _cfg
+          kubectl config view --raw | sed "s/127.0.0.1/$KIND_API_SERVER_ADDRESS/g" > _cfg/k8s_context.yaml
+          export TEST_NETWORK_INGRESS_DOMAIN=$(echo $KIND_API_SERVER_ADDRESS | tr -s '.' '-').nip.io
+          echo "console_domain: $TEST_NETWORK_INGRESS_DOMAIN" >> _cfg/domain.yml
+          echo "ingress_type: gateway-api" >> _cfg/domain.yml
 
-# [BOTH] Apply CoreDNS override
-- name: Apply CoreDNS wildcard override
-  kubernetes.core.k8s:
-    state: present
-    resource_definition: "{{ lookup('template',
-      'templates/k8s/coredns/coredns.yaml.j2') }}"
+      - name: Build collection
+        run: |
+          ansible-galaxy collection build -f
+          ansible-galaxy collection install $(ls -1 | grep fabric_ansible_collection) -f
+
+      - name: Install the 2.4.7 release specifically
+        uses: hyperledgendary/setup-hyperledger-fabric-action@v0.0.1
+        with:
+          version: 2.4.7
+
+      - name: Run the tests
+        run: .github/scripts/run-tests.sh
+
+      # Gateway API only: apply CoreDNS override after the Gateway resource
+      # has been created by the Ansible playbook during the test run.
+      - name: Apply CoreDNS override for Gateway API
+        if: matrix.ingress_type == 'gateway-api'
+        run: |
+          CLUSTER_IP=$(kubectl get svc -A \
+            -l "gateway.envoyproxy.io/owning-gateway-name=fabric-gateway" \
+            -o jsonpath='{.items[0].spec.clusterIP}')
+          # Re-run the coredns override function from the bootstrap script
+          KIND_API_SERVER_ADDRESS=$(sh .github/scripts/get-host-ip.sh) \
+            CLUSTER_IP=$CLUSTER_IP \
+            bash -c "source .github/scripts/kind_with_envoy_gateway.sh && apply_coredns_override"
 ```
-
-> **Note on the Envoy Gateway service name:** Envoy Gateway creates one `Service`
-> per `Gateway` resource, named `envoy-<gateway-namespace>-<gateway-name>` (or
-> `envoy-<gateway-name>` when the gateway is in the same namespace as the
-> controller). Confirm the exact name against the Envoy Gateway version pinned in
-> `envoy_gateway_kustomize_ref` and expose it as a variable
-> `envoy_gateway_service_name` if the naming convention changes between releases.
 
 ---
 
@@ -354,7 +487,94 @@ Therefore this change can be applied unconditionally to both paths.
 
 ---
 
-### 5.5 W5 — Console wait logic
+### 5.5 W5 — Console wait logic and Gateway resource creation
+
+Before the wait logic can query an `HTTPRoute`, a `Gateway` resource must exist
+in the namespace. Since the gateway controller installation is a prerequisite
+(§1.1), the `fabric_operator_crds` role must create the `Gateway` resource itself
+when `ingress_type == 'gateway-api'`. This is the only Gateway API–related manifest
+that belongs inside an Ansible role, because it is namespace-scoped and
+parameterised with `ingress_domain` and `ingress_tls_secret` — values only known
+at role execution time.
+
+**New file:** `roles/fabric_operator_crds/templates/k8s/gateway/fabric-gateway.yaml.j2`
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: fabric-gateway
+  namespace: "{{ namespace }}"
+spec:
+  gatewayClassName: fabric-envoy-gateway
+  listeners:
+    - name: https
+      port: 443
+      protocol: HTTPS
+      hostname: "*.{{ ingress_domain }}"
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: "{{ ingress_tls_secret | default('fabric-tls-secret') }}"
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: orderer-passthrough
+      port: "{{ ingress_grpc_orderer_port }}"
+      protocol: TLS
+      hostname: "*.{{ ingress_domain }}"
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: peer-passthrough
+      port: "{{ ingress_grpc_peer_port }}"
+      protocol: TLS
+      hostname: "*.{{ ingress_domain }}"
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: Same
+```
+
+Add to **`roles/fabric_operator_crds/tasks/k8s/create.yml`**:
+
+```yaml
+# [GW] Create the Gateway resource (namespace-scoped, domain-parameterised).
+# The GatewayClass and Envoy Gateway controller are cluster-level prerequisites
+# installed by the CI bootstrap script or by the cluster administrator.
+- name: Create fabric Gateway resource
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ namespace }}"
+    resource_definition: "{{ lookup('template',
+      'templates/k8s/gateway/fabric-gateway.yaml.j2') }}"
+  when: ingress_type == 'gateway-api'
+
+- name: Wait for fabric Gateway to be programmed
+  kubernetes.core.k8s_info:
+    api_version: gateway.networking.k8s.io/v1
+    kind: Gateway
+    name: fabric-gateway
+    namespace: "{{ namespace }}"
+  register: gw_info
+  until: >
+    gw_info.resources | length > 0 and
+    (gw_info.resources[0].status.conditions |
+     selectattr('type','equalto','Programmed') |
+     selectattr('status','equalto','True') | list | length) > 0
+  retries: 60
+  delay: 5
+  when: ingress_type == 'gateway-api'
+```
+
+This is the **only** Gateway API–related task added to
+`roles/fabric_operator_crds/tasks/k8s/create.yml`. The controller itself is
+never installed from within the role.
+
+---
 
 **File:** `roles/hlfsupport_console/tasks/k8s/create.yml`
 
@@ -424,180 +644,7 @@ prints a URL without waiting for an Ingress resource.
 
 ---
 
-### 5.6 W6 — CI bootstrap
-
-**File:** `.github/scripts/kind_with_nginx.sh` — keep as-is, renamed to make its
-scope explicit.
-
-**New file:** `.github/scripts/kind_with_envoy_gateway.sh`
-
-```bash
-#!/usr/bin/env bash
-# Sets up a KIND cluster with Envoy Gateway for Gateway API integration tests.
-# Replaces kind_with_nginx.sh when ingress_type=gateway-api.
-set -eo pipefail
-
-KIND_CLUSTER_NAME=${KIND_CLUSTER_NAME:-kind}
-KIND_CLUSTER_IMAGE=${KIND_CLUSTER_IMAGE:-kindest/node:v1.29.0}
-KIND_API_SERVER_ADDRESS=${KIND_API_SERVER_ADDRESS:-127.0.0.1}
-KIND_API_SERVER_PORT=${KIND_API_SERVER_PORT:-8888}
-ENVOY_GATEWAY_VERSION=${ENVOY_GATEWAY_VERSION:-v1.2.0}
-
-function kind_with_envoy_gateway() {
-  delete_cluster
-  create_cluster
-  install_gateway_api_crds
-  install_envoy_gateway
-  apply_gatewayclass_and_gateway
-  apply_coredns_override
-}
-
-function delete_cluster() {
-  kind delete cluster --name "$KIND_CLUSTER_NAME" || true
-}
-
-function create_cluster() {
-  cat <<EOF | kind create cluster --name "$KIND_CLUSTER_NAME" \
-                                   --image "$KIND_CLUSTER_IMAGE" --config=-
----
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-nodes:
-  - role: control-plane
-    kubeadmConfigPatches:
-      - |
-        kind: InitConfiguration
-        nodeRegistration:
-          kubeletExtraArgs:
-            node-labels: "ingress-ready=true"
-    extraPortMappings:
-      - containerPort: 443
-        hostPort: 443
-        protocol: TCP
-      - containerPort: 7050       # orderer gRPC passthrough
-        hostPort: 7050
-        protocol: TCP
-      - containerPort: 7051       # peer gRPC passthrough
-        hostPort: 7051
-        protocol: TCP
-networking:
-  apiServerAddress: ${KIND_API_SERVER_ADDRESS}
-  apiServerPort: ${KIND_API_SERVER_PORT}
-EOF
-}
-
-function install_gateway_api_crds() {
-  # Install the standard Gateway API CRDs (includes TLSRoute as experimental)
-  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/experimental-install.yaml
-  kubectl wait --for condition=established \
-    crd/gateways.gateway.networking.k8s.io \
-    crd/httproutes.gateway.networking.k8s.io \
-    crd/tlsroutes.gateway.networking.k8s.io \
-    --timeout=60s
-}
-
-function install_envoy_gateway() {
-  helm install eg oci://docker.io/envoyproxy/gateway-helm \
-    --version "${ENVOY_GATEWAY_VERSION}" \
-    -n envoy-gateway-system --create-namespace
-  kubectl -n envoy-gateway-system rollout status deploy envoy-gateway \
-    --timeout=120s
-}
-
-function apply_gatewayclass_and_gateway() {
-  kubectl apply -f - <<EOF
-apiVersion: gateway.networking.k8s.io/v1
-kind: GatewayClass
-metadata:
-  name: fabric-envoy-gateway
-spec:
-  controllerName: gateway.envoyproxy.io/gatewayclass-controller
-EOF
-
-  # Gateway is created by the Ansible role during the test run.
-  # Wait for the GatewayClass to be Accepted first.
-  kubectl wait --for=condition=Accepted \
-    gatewayclass/fabric-envoy-gateway --timeout=60s
-}
-
-function apply_coredns_override() {
-  # After the Gateway is Programmed (done by Ansible), resolve its ClusterIP.
-  # For CI, we poll until the envoy service appears.
-  local CLUSTER_IP=""
-  for i in $(seq 1 30); do
-    CLUSTER_IP=$(kubectl -n oss-hlf-infra get svc \
-      -l "gateway.envoyproxy.io/owning-gateway-name=fabric-gateway" \
-      -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true)
-    [ -n "$CLUSTER_IP" ] && break
-    sleep 5
-  done
-
-  kubectl apply -f - <<EOF
----
-kind: ConfigMap
-apiVersion: v1
-metadata:
-  name: coredns
-  namespace: kube-system
-data:
-  Corefile: |
-    .:53 {
-        errors
-        health { lameduck 5s }
-        ready
-        rewrite name regex (.*)\.localho\.st host.ingress.internal
-        hosts {
-          ${CLUSTER_IP} host.ingress.internal
-          fallthrough
-        }
-        kubernetes cluster.local in-addr.arpa ip6.arpa {
-           pods insecure
-           fallthrough in-addr.arpa ip6.arpa
-           ttl 30
-        }
-        prometheus :9153
-        forward . /etc/resolv.conf { max_concurrent 1000 }
-        cache 30
-        loop
-        reload
-        loadbalance
-    }
-EOF
-  kubectl -n kube-system rollout restart deployment/coredns
-}
-
-kind_with_envoy_gateway
-
-mkdir -p _cfg
-kubectl config view --raw > _cfg/k8s_context.yaml
-```
-
-**File:** `.github/workflows/fvtest.yml` (and `main.yml`)
-
-Add a matrix dimension `ingress_type: [nginx, gateway-api]` so both paths are
-exercised in CI:
-
-```yaml
-strategy:
-  matrix:
-    ingress_type: [nginx, gateway-api]
-steps:
-  - name: Bootstrap cluster
-    run: |
-      if [ "${{ matrix.ingress_type }}" = "gateway-api" ]; then
-        .github/scripts/kind_with_envoy_gateway.sh
-      else
-        .github/scripts/kind_with_nginx.sh
-      fi
-  - name: Run integration tests
-    env:
-      INGRESS_TYPE: ${{ matrix.ingress_type }}
-    run: .github/scripts/run-integration-tests.sh
-```
-
----
-
-### 5.7 W7 — Route resources (post-operator overlay)
+### 5.6 W6 — Route resources (post-operator overlay)
 
 This is the most complex workstream. It exists because the `fabric-operator`
 currently creates `networking.k8s.io/v1 Ingress` objects automatically when
@@ -611,7 +658,7 @@ This is a transitional overlay, not the end-state. A follow-up upstream PR to
 `fabric-operator` should add native Gateway API support behind a
 `INGRESS_CLASS=gateway` environment variable.
 
-#### 5.7.1 Template: `HTTPRoute` for console, CA, gRPC-Web, and operations
+#### 5.6.1 Template: `HTTPRoute` for console, CA, gRPC-Web, and operations
 
 **New file:** `roles/fabric_console/templates/k8s/gateway/httproute.yaml.j2`
 
@@ -637,7 +684,7 @@ spec:
           port: "{{ component_service_port }}"
 ```
 
-#### 5.7.2 Template: `TLSRoute` for peer gRPC API
+#### 5.6.2 Template: `TLSRoute` for peer gRPC API
 
 **New file:** `roles/endorsing_organization/templates/k8s/gateway/tlsroute-peer.yaml.j2`
 
@@ -659,7 +706,7 @@ spec:
           port: 7051
 ```
 
-#### 5.7.3 Template: `TLSRoute` for orderer gRPC API
+#### 5.6.3 Template: `TLSRoute` for orderer gRPC API
 
 **New file:** `roles/ordering_organization/templates/k8s/gateway/tlsroute-orderer.yaml.j2`
 
@@ -681,7 +728,7 @@ spec:
           port: 7050
 ```
 
-#### 5.7.4 Post-task in endorsing_organization
+#### 5.6.4 Post-task in endorsing_organization
 
 **File:** `roles/endorsing_organization/tasks/create.yml`
 
@@ -700,7 +747,7 @@ After the existing peer creation tasks, add:
     peer_service: "{{ peer_name | lower | replace(' ', '-') }}"
 ```
 
-#### 5.7.5 Post-task in ordering_organization
+#### 5.6.5 Post-task in ordering_organization
 
 **File:** `roles/ordering_organization/tasks/create.yml`
 
@@ -719,7 +766,7 @@ Same pattern:
     orderer_service: "{{ ordering_service_name | lower | replace(' ', '-') }}"
 ```
 
-#### 5.7.6 Upstream contribution target
+#### 5.6.6 Upstream contribution target
 
 File a PR against `hyperledger-labs/fabric-operator` proposing:
 - A new env var `INGRESS_CLASS` with values `nginx` (default) and `gateway-api`.
@@ -728,11 +775,11 @@ File a PR against `hyperledger-labs/fabric-operator` proposing:
 - The operator's `ClusterRole` is extended to include `gateway.networking.k8s.io`
   verbs (mirrors W4 above).
 
-Until that PR is merged, W7's post-task overlay is the supported path.
+Until that PR is merged, W6's post-task overlay is the supported path.
 
 ---
 
-### 5.8 W8 — Documentation
+### 5.7 W7 — Documentation
 
 #### Files to update
 
@@ -755,13 +802,17 @@ Until that PR is merged, W7's post-task overlay is the supported path.
 
 The tutorial must explain:
 
-1. The three-listener Gateway model and why ports 443 / 7050 / 7051 are chosen.
-2. That `api_url` for peers now resolves to port 7051 and for orderers to port 7050.
-3. That `grpcwp_url`, `operations_url`, and CA `api_url` remain on port 443.
-4. The `kubectl get gateway -n <namespace>` command to verify the Gateway is
+1. The three-listener `Gateway` model and why ports 443 / 7050 / 7051 are chosen.
+2. That the `GatewayClass` and Envoy Gateway controller must be installed as a
+   cluster-level prerequisite **before** running any collection playbook —
+   mirroring the existing nginx prerequisite instructions.
+3. That `api_url` for peers now resolves to port 7051 and for orderers to port 7050.
+4. That `grpcwp_url`, `operations_url`, and CA `api_url` remain on port 443.
+5. The `kubectl get gateway -n <namespace>` command to verify the Gateway is
    programmed (replacing the `kubectl get ingress` instructions in the current docs).
-5. The `localho.st` wildcard DNS trick and the CoreDNS override — unchanged
-   conceptually, but now pointing at the Envoy Gateway service.
+6. The `localho.st` wildcard DNS trick and the CoreDNS override — now applied
+   **after** the playbook creates the `Gateway` resource (not before), and now
+   pointing at the Envoy Gateway service ClusterIP.
 
 ---
 
@@ -785,7 +836,7 @@ Each must be updated in its Gateway API conditional branch (not globally).
 | `tutorial/ordering-org-vars.yml` | `api_endpoint: https://....:32000` | Port comment only; actual URL set at runtime by operator |
 | `tutorial/org1-vars.yml` | Same | Same |
 
-`url_utils.py` — [`translate_url_to_os_format()`](../../plugins/module_utils/url_utils.py:8) —
+[`translate_url_to_os_format()`](../../plugins/module_utils/url_utils.py:8)
 currently hard-codes `'443'` as the canonical port in the "os format". It must be
 updated to accept an optional `canonical_port` argument (defaulting to `'443'` for
 backwards compatibility) so callers in `peer_metadata.py` and
@@ -814,7 +865,8 @@ A migration is considered complete when all of the following pass:
 
 1. **[BOTH]** `ansible-lint` and `yamllint` pass on all modified files.
 2. **[NGINX]** All existing integration tests pass with `ingress_type: nginx`
-   (or unset) without modification.
+   (or unset) without modification. `roles/fabric_operator_crds/tasks/k8s/create.yml`
+   is byte-for-byte identical to its pre-migration state when `ingress_type == 'nginx'`.
 3. **[GW]** A KIND cluster bootstrapped with `kind_with_envoy_gateway.sh` and
    `ingress_type: gateway-api` passes the full integration test suite.
 4. **[GW]** Peer `api_url` resolves to port 7051; orderer `api_url` resolves to
@@ -825,4 +877,7 @@ A migration is considered complete when all of the following pass:
    (verified by inspecting the serving certificate CN).
 6. **[GW]** A `fabric-sdk-py` channel join and peer query succeed end-to-end over
    the Gateway API path.
-7. **[BOTH]** Documentation builds without warnings (`make -C docs html`).
+7. **[GW]** The CoreDNS override is applied **after** the Ansible playbook creates
+   the `Gateway` resource (not before), and correctly resolves `*.localho.st` to
+   the Envoy Gateway service ClusterIP.
+8. **[BOTH]** Documentation builds without warnings (`make -C docs html`).

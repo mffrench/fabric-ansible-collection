@@ -2,8 +2,13 @@
 
 ## 1. Context and Driver
 
-The `fabric-ansible-collection` currently provisions [ingress-nginx](https://github.com/kubernetes/ingress-nginx)
-(`controller-v1.1.2`) as the sole Kubernetes ingress solution.
+The `fabric-ansible-collection` requires [ingress-nginx](https://github.com/kubernetes/ingress-nginx)
+(`controller-v1.1.2`) as its sole supported Kubernetes ingress solution.
+ingress-nginx is a **cluster-level prerequisite**: it is not provisioned by any
+Ansible role in this collection, but by the cluster administrator (or, for local
+KIND development, by the CI bootstrap script
+[`kind_with_nginx.sh`](../../.github/scripts/kind_with_nginx.sh) — see §1.1).
+
 The ingress-nginx project [announced end-of-maintenance effective March 2026](https://github.com/kubernetes/ingress-nginx/issues/12272),
 making migration mandatory for any deployment that will remain on a supported path.
 
@@ -17,6 +22,101 @@ The two realistic replacement directions are:
 The sections below examine each option against the concrete protocol requirements
 of Hyperledger Fabric, audit every touch-point in this repository, and close with
 a recommendation and the major concerns to address in the migration plan.
+
+---
+
+## 1.1 How the ingress-nginx controller is currently installed — prerequisite or role task?
+
+This is a critical design question for any migration plan. The answer is
+**the collection does not install ingress-nginx itself**; it is an external
+prerequisite, installed by a shell script that lives outside the Ansible role
+boundary. The evidence is unambiguous:
+
+### What the `fabric_operator_crds` role does (and does not do)
+
+[`roles/fabric_operator_crds/tasks/k8s/create.yml`](../../roles/fabric_operator_crds/tasks/k8s/create.yml)
+contains exactly five tasks:
+
+1. Apply the fabric-operator CRDs from the upstream kustomize ref.
+2. Fail if `namespace` is not set.
+3. Create the namespace if it does not exist.
+4. Create RBAC resources (ClusterRole, ClusterRoleBinding, ServiceAccount).
+5. Deploy the fabric-operator Deployment and wait for it to roll out.
+
+**There is no task that installs, configures, or waits for any ingress controller.**
+The role documentation explicitly states this:
+
+> *"This role does not install an ingress controller; for the opensource Fabric
+> Operations Console and Fabric operator you must configure a suitable ingress
+> controller."*
+> — [`docs/source/roles/fabric-operator-crds.rst`](../../docs/source/roles/fabric-operator-crds.rst#L26)
+
+The same disclaimer appears verbatim in
+[`docs/source/roles/fabric-console.rst`](../../docs/source/roles/fabric-console.rst#L26).
+
+### Where ingress-nginx is installed
+
+The ingress-nginx controller is installed exclusively by the CI shell script
+[`.github/scripts/kind_with_nginx.sh`](../../.github/scripts/kind_with_nginx.sh),
+specifically in its `start_nginx()` function (line 98):
+
+```bash
+kubectl apply -k https://github.com/hyperledger-labs/fabric-operator.git/config/ingress/kind
+```
+
+This is the upstream fabric-operator's own kustomize ref for KIND environments.
+It installs ingress-nginx with SSL passthrough enabled, pinned to the version
+maintained by the fabric-operator project.
+
+The CI workflow [`fvtest.yml`](../../.github/workflows/fvtest.yml) calls
+`kind_with_nginx.sh` as an environment bootstrap step **before** any Ansible
+playbook is executed. The `run-tests.sh` script that follows only calls
+`build_network.sh` (which starts at tutorial step 01) — it assumes nginx is
+already present and operational.
+
+### The CoreDNS override also lives in the shell script
+
+The `apply_coredns_override()` function in `kind_with_nginx.sh` (line 115)
+patches the CoreDNS `ConfigMap` directly via `kubectl apply`. The Ansible
+template at
+[`roles/fabric_operator_crds/templates/k8s/coredns/coredns.yaml.j2`](../../roles/fabric_operator_crds/templates/k8s/coredns/coredns.yaml.j2)
+exists as a template but there is **no Ansible task in any role that applies it**.
+It is only used by the shell script (which contains its own inline copy of the
+same CoreDNS stanza).
+
+### Summary of the boundary
+
+| Responsibility | Handled by |
+|---------------|------------|
+| Install ingress-nginx | `kind_with_nginx.sh` (CI shell script — external to Ansible roles) |
+| Apply CoreDNS wildcard override | `kind_with_nginx.sh` (CI shell script — not an Ansible task) |
+| Install fabric-operator CRDs + operator | `fabric_operator_crds` Ansible role |
+| Deploy console | `fabric_console` / `hlfsupport_console` Ansible role |
+| Deploy peers / orderers / CAs | `endorsing_organization` / `ordering_organization` Ansible roles |
+
+The ingress controller is therefore a **cluster-level prerequisite** that the
+collection assumes is already present when any playbook runs. For end-users
+deploying to a managed Kubernetes service (IKS, EKS, GKE), the documentation
+explicitly directs them to configure their cloud provider's ALB/ingress
+controller manually before running the collection (see
+[`oss-installing.rst` line 40](../../docs/source/tutorials/oss-installing.rst#L40)
+and
+[`hlfsupport-installing.rst` line 44](../../docs/source/tutorials/hlfsupport-installing.rst#L44)).
+
+### Implication for the migration plan
+
+The migration plan must **preserve this boundary**: the ingress / gateway
+controller installation remains outside the Ansible role scope, handled either
+by the user for production clusters or by a CI bootstrap script for local KIND
+development. What the migration plan *does* need to add is:
+
+1. A new CI bootstrap script for the Gateway API path
+   (replacing `kind_with_nginx.sh` with a `kind_with_envoy_gateway.sh`).
+2. Updated prerequisites documentation telling users what to install before
+   running the collection with `ingress_type: gateway-api`.
+3. **No changes to the task entry points** of `fabric_operator_crds`,
+   `fabric_console`, `endorsing_organization`, or `ordering_organization` for
+   the purposes of installing a gateway controller.
 
 ---
 
@@ -97,29 +197,35 @@ on the HTTPS listener.
 
 ## 3. Current ingress-nginx Integration — Complete Touch-point Audit
 
-| File | Role | What must change |
-|------|------|-----------------|
-| [`roles/fabric_operator_crds/templates/k8s/ingress/kustomization.yaml`](../../roles/fabric_operator_crds/templates/k8s/ingress/kustomization.yaml) | Installs ingress-nginx v1.1.2 from upstream kustomize ref | Replace entirely |
-| [`roles/fabric_operator_crds/templates/k8s/ingress/ingress-nginx-controller.yaml`](../../roles/fabric_operator_crds/templates/k8s/ingress/ingress-nginx-controller.yaml) | Adds `--enable-ssl-passthrough` patch | Replace entirely |
-| [`roles/fabric_operator_crds/templates/k8s/coredns/coredns.yaml.j2`](../../roles/fabric_operator_crds/templates/k8s/coredns/coredns.yaml.j2) | Rewrites `*.localho.st` → `host.ingress.internal` pointing at the nginx ClusterIP | The target ClusterIP / Service reference must change |
-| [`roles/fabric_operator_crds/defaults/main.yml`](../../roles/fabric_operator_crds/defaults/main.yml#L46) | `ingress_domain: localho.st` default | Probably stays; depends on replacement controller's LoadBalancer IP shape |
-| [`roles/fabric_operator_crds/templates/k8s/rbac/hlf-operator-clusterrole.yaml`](../../roles/fabric_operator_crds/templates/k8s/rbac/hlf-operator-clusterrole.yaml#L182) | Grants the operator `get/create/…` on `networking.k8s.io/ingresses` | Must be extended to include Gateway API resource groups (`gateway.networking.k8s.io`) or Istio CRDs |
-| [`roles/hlfsupport_console/templates/k8s/cluster_role.yml.j2`](../../roles/hlfsupport_console/templates/k8s/cluster_role.yml.j2#L168) | Same RBAC gap for `hlfsupport` variant | Same extension required |
-| [`roles/hlfsupport_console/tasks/k8s/create.yml`](../../roles/hlfsupport_console/tasks/k8s/create.yml#L146) | Waits on `networking.k8s.io/v1 Ingress` resources to appear | Must be adapted for `HTTPRoute` / Istio `VirtualService` depending on choice |
-| [`.github/scripts/kind_with_nginx.sh`](../../.github/scripts/kind_with_nginx.sh) | CI: provisions KIND + nginx from `fabric-operator.git/config/ingress/kind` + CoreDNS override | Must be replaced with equivalent CI bootstrap script |
-| [`docs/source/tutorials/oss-installing.rst`](../../docs/source/tutorials/oss-installing.rst#L40) | Advises configuring nginx ALB SSL passthrough on IKS | Documentation must reflect new gateway |
-| [`docs/source/tutorials/hlfsupport-installing.rst`](../../docs/source/tutorials/hlfsupport-installing.rst#L44) | Same IKS/nginx advisory | Same documentation update |
-| [`docs/source/roles/fabric-operator-crds.rst`](../../docs/source/roles/fabric-operator-crds.rst#L23) | States "this role does not install an ingress controller" | Update to mention Gateway API / Istio |
-| [`docs/source/roles/fabric-console.rst`](../../docs/source/roles/fabric-console.rst#L23) | Same statement | Same update |
+The table below covers every file in the collection that encodes ingress-nginx
+assumptions — either as CI infrastructure, as dead-letter templates, as RBAC
+grants, or as application-level wait logic. None of these files provision the
+ingress-nginx controller itself; they either configure or assume it.
 
-Additionally, the `fabric-operator` upstream project is referenced at install time:
+| File | What it encodes | What must change |
+|------|----------------|-----------------|
+| [`.github/scripts/kind_with_nginx.sh`](../../.github/scripts/kind_with_nginx.sh) | CI prerequisite: installs ingress-nginx for KIND via `kubectl apply -k fabric-operator.git/config/ingress/kind`, then applies CoreDNS override | Replace with a new `kind_with_envoy_gateway.sh` for the Gateway API CI path; keep this script for the nginx CI path |
+| [`roles/fabric_operator_crds/templates/k8s/ingress/kustomization.yaml`](../../roles/fabric_operator_crds/templates/k8s/ingress/kustomization.yaml) | Dead-letter template: references ingress-nginx v1.1.2 kustomize ref — **not wired to any Ansible task** | Replace with Gateway API equivalent templates (also unwired; installed by CI or admin) |
+| [`roles/fabric_operator_crds/templates/k8s/ingress/ingress-nginx-controller.yaml`](../../roles/fabric_operator_crds/templates/k8s/ingress/ingress-nginx-controller.yaml) | Dead-letter template: `--enable-ssl-passthrough` patch — **not wired to any Ansible task** | Replace with Gateway API equivalent or delete |
+| [`roles/fabric_operator_crds/templates/k8s/coredns/coredns.yaml.j2`](../../roles/fabric_operator_crds/templates/k8s/coredns/coredns.yaml.j2) | Dead-letter template: CoreDNS rewrite pointing at nginx ClusterIP — **not wired to any Ansible task**; the CI script contains its own inline copy | Update `host.ingress.internal` target; CI script's inline copy must also be updated |
+| [`roles/fabric_operator_crds/defaults/main.yml`](../../roles/fabric_operator_crds/defaults/main.yml#L46) | Default variable `ingress_domain: localho.st` used by templates | Probably stays; does not reference nginx by name |
+| [`roles/fabric_operator_crds/templates/k8s/rbac/hlf-operator-clusterrole.yaml`](../../roles/fabric_operator_crds/templates/k8s/rbac/hlf-operator-clusterrole.yaml#L182) | Grants the operator `get/create/…` on `networking.k8s.io/ingresses` | Extend to include `gateway.networking.k8s.io` resources |
+| [`roles/hlfsupport_console/templates/k8s/cluster_role.yml.j2`](../../roles/hlfsupport_console/templates/k8s/cluster_role.yml.j2#L168) | Same RBAC grant for `hlfsupport` variant | Same extension required |
+| [`roles/hlfsupport_console/tasks/k8s/create.yml`](../../roles/hlfsupport_console/tasks/k8s/create.yml#L146) | **Live task**: waits on `networking.k8s.io/v1 Ingress` resource to appear and derives the console URL from it | Make conditional on `ingress_type`; add `HTTPRoute` wait branch |
+| [`docs/source/tutorials/oss-installing.rst`](../../docs/source/tutorials/oss-installing.rst#L40) | Prerequisite note: directs IKS users to configure nginx ALB SSL passthrough manually | Update to direct users to install the Gateway API controller instead |
+| [`docs/source/tutorials/hlfsupport-installing.rst`](../../docs/source/tutorials/hlfsupport-installing.rst#L44) | Same prerequisite note | Same update |
+| [`docs/source/roles/fabric-operator-crds.rst`](../../docs/source/roles/fabric-operator-crds.rst#L23) | States "this role does not install an ingress controller; you must configure a suitable ingress controller" | Update the referenced controller name; the statement itself remains accurate |
+| [`docs/source/roles/fabric-console.rst`](../../docs/source/roles/fabric-console.rst#L23) | Same disclaimer | Same update |
+
+Additionally, the CI bootstrap script delegates to the upstream `fabric-operator`
+project's own kustomize ref for the nginx + SSL-passthrough configuration:
 
 ```
 kubectl apply -k https://github.com/hyperledger-labs/fabric-operator.git/config/ingress/kind
 ```
 
-That kustomize path also lives upstream; any replacement strategy must either wait
-for or contribute a Gateway API / Istio equivalent in that repository.
+That kustomize path also lives upstream; a Gateway API / Istio equivalent should
+either be contributed there or maintained locally in the CI script.
 
 ---
 
@@ -193,19 +299,24 @@ Cloud-managed controllers (AWS ALB, GKE Gateway, Azure AG) do **not** yet suppor
 
 A Gateway API migration would produce:
 
-1. **A `GatewayClass` + `Gateway`** manifest with two listeners (`:443 HTTPS` and
-   `:7051 TLS Passthrough`), replacing `kustomization.yaml` +
-   `ingress-nginx-controller.yaml`, parameterised with `ingress_domain`.
-2. **`TLSRoute` resources** for the raw gRPC `api_url` endpoints — generated or
-   applied by the `fabric-operator` when it creates `IBPPeer` / `IBPOrderer`
-   objects. This requires either an upstream change to the operator or a
-   post-creation Ansible task that creates these routes.
-3. **`HTTPRoute` resources** for the console, gRPC-Web proxy, CA, and Operations
+1. **A new CI bootstrap script** (`kind_with_envoy_gateway.sh`) that installs
+   the `GatewayClass` + Envoy Gateway controller as a cluster prerequisite,
+   replacing the nginx installation step in `kind_with_nginx.sh`. Production
+   cluster administrators follow the same pattern manually.
+2. **A `Gateway` manifest** (namespace-scoped, domain-parameterised) applied by
+   the `fabric_operator_crds` role with two listeners (`:443 HTTPS` and
+   `:7050`/`:7051 TLS Passthrough`). Unlike the controller itself, the `Gateway`
+   resource is a per-deployment configuration that belongs inside the Ansible role.
+3. **`TLSRoute` resources** for the raw gRPC `api_url` endpoints — generated by a
+   post-creation Ansible task (until the `fabric-operator` upstream adds native
+   Gateway API support).
+4. **`HTTPRoute` resources** for the console, gRPC-Web proxy, CA, and Operations
    endpoints.
-4. **Updated CoreDNS** `ConfigMap` pointing at the new Gateway's ClusterIP.
-5. **Updated RBAC** to grant the operator `gateway.networking.k8s.io` permissions.
-6. **`api_url` port change** in tutorial vars and documentation from `:443` / `:32000`
-   to `:7051` for gRPC passthrough endpoints (see §8.6).
+5. **Updated CI CoreDNS override** in the bootstrap script, pointing at the Envoy
+   Gateway service ClusterIP instead of the nginx service ClusterIP.
+6. **Updated RBAC** to grant the operator `gateway.networking.k8s.io` permissions.
+7. **`api_url` port change** in tutorial vars and documentation from `:443` / `:32000`
+   to `:7050` (orderer) / `:7051` (peer) for gRPC passthrough endpoints (see §8.6).
 
 ### 4.4 Dependency on fabric-operator
 
@@ -369,13 +480,13 @@ automatically. **The plan must either:**
 
 ### 8.2 TLSRoute stability and implementation selection
 
-`TLSRoute` is a beta resource in Gateway API v1.1. The collection must **pin a
-specific Gateway API version** and a specific implementation (e.g. Envoy Gateway
-v1.x) to ensure `TLSRoute` is available. The kustomize install reference
-(currently pinned to `controller-v1.1.2` of ingress-nginx) must be updated to a
-stable Envoy Gateway release tag. The CI script
-[`kind_with_nginx.sh`](../../.github/scripts/kind_with_nginx.sh) must be
-completely rewritten as `kind_with_envoy_gateway.sh` (or equivalent).
+`TLSRoute` is a beta resource in Gateway API v1.1. The CI bootstrap script must
+**pin a specific Gateway API version** and a specific implementation (e.g. Envoy
+Gateway v1.x) to ensure `TLSRoute` is available. The current script
+[`kind_with_nginx.sh`](../../.github/scripts/kind_with_nginx.sh) pins
+`controller-v1.1.2` of ingress-nginx via a kustomize ref; the new
+`kind_with_envoy_gateway.sh` must pin an equivalent stable Envoy Gateway release
+tag. The nginx script itself is unchanged and continues to serve the legacy CI path.
 
 ### 8.3 RBAC extension for the operator
 
@@ -388,14 +499,17 @@ The same applies to the `hlfsupport_console` cluster role template.
 
 ### 8.4 CoreDNS wildcard override
 
-The CoreDNS `ConfigMap`
+The CoreDNS `ConfigMap` template
 ([`coredns.yaml.j2`](../../roles/fabric_operator_crds/templates/k8s/coredns/coredns.yaml.j2))
-rewrites `*.localho.st` to the ingress-nginx `ClusterIP`. This ClusterIP is
-obtained at runtime from `kubectl -n ingress-nginx get svc ingress-nginx-controller`.
-For the replacement, the equivalent Service reference will be in a different
-namespace and have a different name (e.g. `envoy-gateway-system` namespace,
-`envoy-gateway` service). The Jinja2 template and the Ansible task that populates
-`clusterip` must be updated.
+and its inline copy inside `kind_with_nginx.sh` both rewrite `*.localho.st` to
+the ingress-nginx service ClusterIP. This is applied exclusively by the CI shell
+script (`apply_coredns_override()`) — there is no Ansible task that applies it.
+For the Gateway API path, the same CI-script function must resolve the Envoy
+Gateway service ClusterIP instead. There is a timing constraint: the Envoy Gateway
+service for a given namespace only appears after the `Gateway` resource is created
+by the Ansible role, so the CoreDNS override step must run **after** the playbook,
+not before. This is a change in CI workflow sequencing, not a change in any Ansible
+role.
 
 ### 8.5 `IBPConsole` Ingress wait logic
 
@@ -434,9 +548,13 @@ losing the clean protocol separation. The plan must make this choice explicit.
 
 Today, `ingress_domain` is the only ingress-related variable. A new variable
 (e.g. `ingress_type: nginx | gateway-api | istio`) should be introduced to allow
-conditional role paths and to preserve backwards compatibility during the
-transition. Existing users on nginx must not be broken immediately; the nginx
-path should be deprecated gracefully.
+conditional role behaviour where the collection's own tasks differ between paths —
+specifically the `Gateway` resource creation (§W5 in the migration plan), the
+console `Ingress` vs `HTTPRoute` wait logic (§W5), and the post-operator route
+overlay (§W6). It does **not** control which ingress controller is installed, since
+that remains the responsibility of the cluster administrator or CI bootstrap script.
+Existing users on nginx must not be broken; the nginx path should remain the
+default and be deprecated gracefully.
 
 ### 8.8 Documentation and tutorial refresh
 
@@ -453,13 +571,20 @@ local development setup with `localho.st` must be written.
 ### 8.9 CI pipeline parity
 
 The GitHub Actions workflow relies on
-[`kind_with_nginx.sh`](../../.github/scripts/kind_with_nginx.sh).
-A replacement CI bootstrap must:
-1. Install KIND with port mappings for `:443` and `:7051`.
-2. Install Envoy Gateway (or chosen implementation).
-3. Apply `GatewayClass` + `Gateway` manifests with both listeners.
-4. Apply the CoreDNS override pointing at the new gateway's ClusterIP.
-5. Validate that `TLSRoute` passthrough is functional before running integration tests.
+[`kind_with_nginx.sh`](../../.github/scripts/kind_with_nginx.sh) to provision
+the cluster prerequisite (ingress-nginx + CoreDNS) before any Ansible playbook
+runs. A new parallel script `kind_with_envoy_gateway.sh` must:
+1. Create a KIND cluster with host-port mappings for `:443`, `:7050`, and `:7051`.
+2. Install the Gateway API CRDs (experimental channel, for `TLSRoute`).
+3. Install Envoy Gateway (or chosen implementation) as the `GatewayClass` controller.
+4. Apply the `GatewayClass` resource and wait for it to be `Accepted`.
+5. **Not** apply the `Gateway` resource or the CoreDNS override — these depend on
+   the namespace and domain that are only known when the Ansible playbook runs.
+6. After the Ansible playbook has executed, apply the CoreDNS override pointing at
+   the Envoy Gateway service ClusterIP.
+
+The existing `kind_with_nginx.sh` is kept unchanged and continues to be used when
+`ingress_type == 'nginx'`. The CI workflow matrix runs both scripts in parallel.
 
 ### 8.10 Compatibility with OpenShift
 
