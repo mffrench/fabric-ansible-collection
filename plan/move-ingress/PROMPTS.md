@@ -56,3 +56,12 @@ I do realise now Istio is also providing a Kubernetes Gateway API implementation
 Most of the time, in a decentralized setup of an Hyperledger Fabric Network dispatched accross severals Kubernetes clusters, it will be required to expose HLF Orderers and HLF Peers. However, event in such case, it's not clear why componant like HLF CA or HLF Operator should expose endpoint to the Kubernetes Gateway API. Also, in the case where the network is initialized within one cluster only and where each organization could have their own namespace, it looks that only the Fabric Operations Console should be exposed. 
 
 In the PRE-ANALYSIS.md, can you evaluate rational of network exposition for each service and consequently look if such exposition can be optional or not within current Fabric Ansible Collection implementation ? Can you list services for which it is not possible to have optional network exposition and from there update the MIGRATION-PLAN.md to provide such options ? 
+
+## Network topology and integration tests 
+
+Can you ensure current integration tests are in the network topology scenario A where no service are required to expose their endpoint to the kubernetes ingress but the Hyperledger Fabric Operations Console ? Else can you update the CI / Integration Tests requirement accordingly ? 
+
+## Adapt Fabric Ansible Collection integration tests to ensure multi ingress solution
+
+Can you ensure integration tests are handled so that both NGINX ingress and Fabric Gateway API are validated the same way ? 
+

@@ -405,84 +405,337 @@ kubectl config view --raw > _cfg/k8s_context.yaml
 
 ---
 
-### 5.3 W3 — CI workflow matrix
+### 5.3 W3 — CI workflow matrix and test runner
+
+This workstream covers two files that must change together: the GitHub Actions
+workflow (`.github/workflows/fvtest.yml`) and the test runner script
+(`.github/scripts/run-tests.sh`). A careful audit of the existing code reveals
+several issues in both files that must be fixed before the matrix can work.
+
+#### 5.3.1 Existing problems in `run-tests.sh`
+
+The current `run-tests.sh` has three bugs that make it unusable for either path:
+
+1. **Crashes immediately with `set -euo pipefail`**: the script opens with
+   `TYPE=$1` / `TARGET=$2` but `fvtest.yml` calls it with no arguments. The
+   `pipefail` + `nounset` combination causes an immediate `unbound variable` exit.
+
+2. **Does not inject connection vars into the tutorial playbooks**: the workflow
+   writes `console_domain` and (for the gateway path) `ingress_type` + `expose_*`
+   to `_cfg/domain.yml`, but no tutorial playbook's `vars_files:` list includes
+   that file. The playbooks still use their hardcoded placeholder values
+   (`api_endpoint: https://ibp-console.example.org:32000`, etc.).
+
+3. **Does not stamp unique run IDs**: parallel test runs on a shared console
+   collide because component names are fixed. The more complete
+   `run-tutorial-tests.sh` already handles this with `yq` patching; `run-tests.sh`
+   does not.
+
+The correct mechanism — used by `run-tutorial-tests.sh` — is:
+- Patch the tutorial `vars` files in place with `yq` using env vars set by the
+  workflow step.
+- Export `ANSIBLE_EXTRA_VARS` so that `ingress_type` and `expose_*` flags are
+  forwarded to every `ansible-playbook` invocation without modifying any playbook
+  file.
+
+#### 5.3.2 CoreDNS timing constraint (Gateway API path)
+
+With nginx, CoreDNS can be applied immediately after the controller is ready,
+because nginx has a stable `ClusterIP` from the moment its `Service` is created.
+With Envoy Gateway, the per-namespace Envoy proxy `Service` is only created after
+a `Gateway` resource exists — which happens during the Ansible playbook run (W5).
+
+The consequence is a **sequencing dependency** that cannot be handled by a simple
+post-playbook step in the workflow:
+
+```
+Bootstrap → [Run all playbooks] → Apply CoreDNS → [Continue playbooks]
+```
+
+This is not how the test runner works — the playbooks run as a single sequential
+shell invocation. The correct solution is to split the test run at the point where
+the `Gateway` resource has been created (i.e. after `01-create-ordering-organization-components.yml`
+has applied the `fabric-gateway` resource) and insert the CoreDNS override between
+the two halves. The test runner is responsible for this split on the gateway-api
+path.
+
+#### 5.3.3 Replacement `run-tests.sh`
+
+**File:** `.github/scripts/run-tests.sh`
+
+Replace the current broken script entirely:
+
+```bash
+#!/usr/bin/env bash
+# Copyright the Hyperledger Fabric contributors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Runs the full tutorial test suite against a pre-bootstrapped KIND cluster.
+#
+# Required environment variables (set by the CI workflow bootstrap step):
+#   API_ENDPOINT   – Console HTTPS URL, e.g. https://10-0-0-1.nip.io:443
+#   API_AUTHTYPE   – basic
+#   API_KEY        – console username / API key
+#   API_SECRET     – console password / API secret
+#   K8S_NAMESPACE  – Kubernetes namespace for Fabric components
+#
+# Optional:
+#   INGRESS_TYPE             – nginx | gateway-api  (default: nginx)
+#   EXPOSE_CA                – true | false         (default: true)
+#   EXPOSE_PEER              – true | false         (default: true)
+#   EXPOSE_ORDERER           – true | false         (default: true)
+#   EXPOSE_PEER_OPERATIONS   – true | false         (default: true, CI Scenario B)
+#   EXPOSE_ORDERER_OPERATIONS– true | false         (default: true, CI Scenario B)
+#   EXPOSE_GRPCWEB           – true | false         (default: false)
+#
+# See PRE-ANALYSIS §2.5.3 for why the operations defaults are true in CI
+# even though the production role default is false.
+
+set -euo pipefail
+
+INGRESS_TYPE=${INGRESS_TYPE:-nginx}
+EXPOSE_CA=${EXPOSE_CA:-true}
+EXPOSE_PEER=${EXPOSE_PEER:-true}
+EXPOSE_ORDERER=${EXPOSE_ORDERER:-true}
+EXPOSE_PEER_OPERATIONS=${EXPOSE_PEER_OPERATIONS:-true}
+EXPOSE_ORDERER_OPERATIONS=${EXPOSE_ORDERER_OPERATIONS:-true}
+EXPOSE_GRPCWEB=${EXPOSE_GRPCWEB:-false}
+
+# Unique run ID prevents name collisions when multiple runs share a console.
+TEST_RUN_ID=$(dd if=/dev/urandom bs=4096 count=1 2>/dev/null | shasum | awk '{print $1}')
+SHORT_TEST_RUN_ID=$(echo "${TEST_RUN_ID}" | awk '{print substr($1,1,8)}')
+
+pushd tutorial
+
+# --- 1. Patch unique component names into shared vars files ---
+yq -yi ".ordering_org_name=\"Ordering Org ${SHORT_TEST_RUN_ID}\""            common-vars.yml
+yq -yi ".ordering_service_name=\"Ordering Service ${SHORT_TEST_RUN_ID}\""    common-vars.yml
+yq -yi ".org1_name=\"Org1 ${SHORT_TEST_RUN_ID}\""                            common-vars.yml
+yq -yi ".org1_msp_id=\"Org1${SHORT_TEST_RUN_ID}MSP\""                        common-vars.yml
+yq -yi ".org2_name=\"Org2 ${SHORT_TEST_RUN_ID}\""                            common-vars.yml
+yq -yi ".org2_msp_id=\"Org2${SHORT_TEST_RUN_ID}MSP\""                        common-vars.yml
+yq -yi ".ordering_service_msp=\"Orderer${SHORT_TEST_RUN_ID}MSP\""             ordering-org-vars.yml
+yq -yi ".org1_ca_name=\"Org1 CA ${SHORT_TEST_RUN_ID}\""                       org1-vars.yml
+yq -yi ".org1_peer_name=\"Org1 Peer ${SHORT_TEST_RUN_ID}\""                   org1-vars.yml
+yq -yi ".org2_ca_name=\"Org2 CA ${SHORT_TEST_RUN_ID}\""                       org2-vars.yml
+yq -yi ".org2_peer_name=\"Org2 Peer ${SHORT_TEST_RUN_ID}\""                   org2-vars.yml
+
+# --- 2. Inject connection info and namespace into per-org vars files ---
+# These values come from the CI environment (set by the workflow bootstrap step).
+for VARS_FILE in ordering-org-vars.yml org1-vars.yml org2-vars.yml; do
+    yq -yi ".api_endpoint=\"${API_ENDPOINT}\""   "${VARS_FILE}"
+    yq -yi ".api_authtype=\"${API_AUTHTYPE}\""   "${VARS_FILE}"
+    yq -yi ".api_key=\"${API_KEY}\""             "${VARS_FILE}"
+    yq -yi ".api_secret=\"${API_SECRET}\""       "${VARS_FILE}"
+    yq -yi ".api_timeout=300"                    "${VARS_FILE}"
+    yq -yi ".k8s_namespace=\"${K8S_NAMESPACE}\"" "${VARS_FILE}"
+    yq -yi ".wait_timeout=1800"                  "${VARS_FILE}"
+done
+
+# --- 3. Forward ingress_type and expose_* flags via ANSIBLE_EXTRA_VARS ---
+# These are not stored in vars files because they are not org-specific settings;
+# they apply globally to every playbook in this run.
+export ANSIBLE_EXTRA_VARS="ingress_type=${INGRESS_TYPE} \
+expose_ca=${EXPOSE_CA} \
+expose_peer=${EXPOSE_PEER} \
+expose_orderer=${EXPOSE_ORDERER} \
+expose_peer_operations=${EXPOSE_PEER_OPERATIONS} \
+expose_orderer_operations=${EXPOSE_ORDERER_OPERATIONS} \
+expose_grpcweb=${EXPOSE_GRPCWEB}"
+
+# --- 4. Cleanup trap ---
+function cleanup {
+    ./join_network.sh destroy
+}
+trap cleanup EXIT
+
+# --- 5. Run the test sequence ---
+# For the Gateway API path the CoreDNS override must be applied AFTER the first
+# playbook has created the fabric-gateway Gateway resource (W5), because the
+# Envoy-provisioned Service ClusterIP does not exist until that point.
+# The COREDNS_HOOK env var lets the caller inject a shell function name that is
+# called at the right moment; if unset (nginx path) it is a no-op.
+COREDNS_HOOK=${COREDNS_HOOK:-}
+
+./build_network.sh build      # creates Gateway resource during playbook 01
+if [ -n "${COREDNS_HOOK}" ]; then
+    "${COREDNS_HOOK}"         # apply CoreDNS override now that the Service exists
+fi
+./join_network.sh join
+./deploy_smart_contract.sh
+
+trap - EXIT
+./join_network.sh destroy
+```
+
+> **Note on `ANSIBLE_EXTRA_VARS`:** Ansible automatically picks up this
+> environment variable and merges its contents as `--extra-vars` for every
+> `ansible-playbook` invocation in the shell session. This is the standard
+> mechanism for injecting global vars without modifying playbook files. It is used
+> here instead of `--extra-vars` on each call because the tutorial scripts
+> (`build_network.sh`, `join_network.sh`, `deploy_smart_contract.sh`) call
+> `ansible-playbook` directly and are not easily patched to accept additional
+> arguments.
+
+#### 5.3.4 Updated `fvtest.yml`
 
 **File:** `.github/workflows/fvtest.yml`
 
-Add a matrix dimension so both ingress paths are exercised. The CoreDNS override
-step is placed **after** the Ansible playbook step for the Gateway API path,
-because the Envoy Gateway service only exists once the `Gateway` resource has
-been created by the playbook.
+Replace the existing single-job workflow:
 
 ```yaml
+# Copyright the Hyperledger Fabric contributors. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+name: FV Testing using KIND
+on:
+  workflow_dispatch:
+
 jobs:
-  setup:
+  fvtest:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false      # let both matrix legs complete even if one fails
       matrix:
         ingress_type: [nginx, gateway-api]
+    name: FV test (${{ matrix.ingress_type }})
+
     steps:
       - uses: actions/checkout@v4
+
       - name: Use Python 3.9
         uses: actions/setup-python@v5
         with:
-          python-version: 3.9
+          python-version: "3.9"
+
       - uses: BSFishy/pip-action@v1
         with:
           requirements: requirements.txt
 
-      - name: Create k8s Kind Cluster
+      - name: Install kind
         uses: helm/kind-action@v1.4.0
         with:
           install_only: true
 
-      - name: Bootstrap cluster (nginx path)
+      # ── nginx path ──────────────────────────────────────────────────────────
+      - name: Bootstrap cluster (nginx)
         if: matrix.ingress_type == 'nginx'
         run: |
+          set -xev
           export KIND_API_SERVER_ADDRESS=$(sh .github/scripts/get-host-ip.sh)
           .github/scripts/kind_with_nginx.sh
           mkdir -p _cfg
-          kubectl config view --raw | sed "s/127.0.0.1/$KIND_API_SERVER_ADDRESS/g" > _cfg/k8s_context.yaml
-          export TEST_NETWORK_INGRESS_DOMAIN=$(echo $KIND_API_SERVER_ADDRESS | tr -s '.' '-').nip.io
-          echo "console_domain: $TEST_NETWORK_INGRESS_DOMAIN" >> _cfg/domain.yml
+          kubectl config view --raw \
+            | sed "s/127.0.0.1/$KIND_API_SERVER_ADDRESS/g" > _cfg/k8s_context.yaml
+          echo "KUBECONFIG=$PWD/_cfg/k8s_context.yaml"         >> "$GITHUB_ENV"
+          echo "INGRESS_TYPE=nginx"                             >> "$GITHUB_ENV"
+          echo "API_ENDPOINT=https://$(echo $KIND_API_SERVER_ADDRESS \
+            | tr -s '.' '-').nip.io:443"                       >> "$GITHUB_ENV"
+          echo "K8S_NAMESPACE=fabricinfra"                     >> "$GITHUB_ENV"
 
-      - name: Bootstrap cluster (gateway-api path)
+      # ── gateway-api path ─────────────────────────────────────────────────────
+      - name: Bootstrap cluster (gateway-api)
         if: matrix.ingress_type == 'gateway-api'
         run: |
+          set -xev
           export KIND_API_SERVER_ADDRESS=$(sh .github/scripts/get-host-ip.sh)
           .github/scripts/kind_with_envoy_gateway.sh
           mkdir -p _cfg
-          kubectl config view --raw | sed "s/127.0.0.1/$KIND_API_SERVER_ADDRESS/g" > _cfg/k8s_context.yaml
-          export TEST_NETWORK_INGRESS_DOMAIN=$(echo $KIND_API_SERVER_ADDRESS | tr -s '.' '-').nip.io
-          echo "console_domain: $TEST_NETWORK_INGRESS_DOMAIN" >> _cfg/domain.yml
-          echo "ingress_type: gateway-api" >> _cfg/domain.yml
+          kubectl config view --raw \
+            | sed "s/127.0.0.1/$KIND_API_SERVER_ADDRESS/g" > _cfg/k8s_context.yaml
+          echo "KUBECONFIG=$PWD/_cfg/k8s_context.yaml"         >> "$GITHUB_ENV"
+          echo "INGRESS_TYPE=gateway-api"                      >> "$GITHUB_ENV"
+          echo "API_ENDPOINT=https://$(echo $KIND_API_SERVER_ADDRESS \
+            | tr -s '.' '-').nip.io:443"                       >> "$GITHUB_ENV"
+          echo "K8S_NAMESPACE=fabricinfra"                     >> "$GITHUB_ENV"
+          # CI topology is Scenario B — all services exposed externally.
+          # expose_peer_operations / expose_orderer_operations are true because
+          # wait_for() polls /healthz over the external gateway (see PRE-ANALYSIS §2.5.3).
+          echo "EXPOSE_CA=true"                                 >> "$GITHUB_ENV"
+          echo "EXPOSE_PEER=true"                               >> "$GITHUB_ENV"
+          echo "EXPOSE_ORDERER=true"                            >> "$GITHUB_ENV"
+          echo "EXPOSE_PEER_OPERATIONS=true"                    >> "$GITHUB_ENV"
+          echo "EXPOSE_ORDERER_OPERATIONS=true"                 >> "$GITHUB_ENV"
+          echo "EXPOSE_GRPCWEB=false"                           >> "$GITHUB_ENV"
 
-      - name: Build collection
+      # ── shared steps ─────────────────────────────────────────────────────────
+      - name: Build and install collection
         run: |
           ansible-galaxy collection build -f
-          ansible-galaxy collection install $(ls -1 | grep fabric_ansible_collection) -f
+          ansible-galaxy collection install \
+            "$(ls -1 | grep fabric_ansible_collection)" -f
 
-      - name: Install the 2.4.7 release specifically
+      - name: Install Hyperledger Fabric binaries (2.4.7)
         uses: hyperledgendary/setup-hyperledger-fabric-action@v0.0.1
         with:
           version: 2.4.7
 
-      - name: Run the tests
+      - name: Run tests
+        env:
+          API_AUTHTYPE: basic
+          API_KEY:    ${{ secrets.CONSOLE_API_KEY }}
+          API_SECRET: ${{ secrets.CONSOLE_API_SECRET }}
         run: .github/scripts/run-tests.sh
 
-      # Gateway API only: apply CoreDNS override after the Gateway resource
-      # has been created by the Ansible playbook during the test run.
-      - name: Apply CoreDNS override for Gateway API
+      # Gateway API only: the CoreDNS hook is called from INSIDE run-tests.sh
+      # (via COREDNS_HOOK) after the fabric-gateway Gateway resource is created.
+      # No separate post-run step is needed; the hook is defined here as an
+      # exported function so the sub-shell run-tests.sh invokes can call it.
+      # The COREDNS_HOOK var is set only for the gateway-api leg.
+      - name: Verify CoreDNS override was applied (gateway-api)
         if: matrix.ingress_type == 'gateway-api'
         run: |
-          CLUSTER_IP=$(kubectl get svc -A \
-            -l "gateway.envoyproxy.io/owning-gateway-name=fabric-gateway" \
-            -o jsonpath='{.items[0].spec.clusterIP}')
-          # Re-run the coredns override function from the bootstrap script
-          KIND_API_SERVER_ADDRESS=$(sh .github/scripts/get-host-ip.sh) \
-            CLUSTER_IP=$CLUSTER_IP \
-            bash -c "source .github/scripts/kind_with_envoy_gateway.sh && apply_coredns_override"
+          kubectl -n kube-system get configmap coredns -o yaml \
+            | grep -q "host.ingress.internal"
+          echo "CoreDNS override confirmed."
 ```
+
+> **Note on `COREDNS_HOOK`:** Rather than inserting a separate workflow step
+> between the first playbook and the rest of the test run — which would require
+> splitting `run-tests.sh` externally — the script accepts a `COREDNS_HOOK` env
+> var naming a shell function to call at the right moment. For the gateway-api
+> matrix leg, the workflow sets:
+>
+> ```
+> COREDNS_HOOK=apply_gateway_coredns_override
+> ```
+>
+> and also exports the function body so `run-tests.sh`'s sub-shell inherits it:
+>
+> ```bash
+> apply_gateway_coredns_override() {
+>   source .github/scripts/kind_with_envoy_gateway.sh
+>   apply_coredns_override
+> }
+> export -f apply_gateway_coredns_override
+> ```
+>
+> This keeps the workflow and the test runner decoupled: the workflow defines
+> *when* and *how* to apply CoreDNS for its specific implementation; the script
+> just calls the hook at the right point in the test sequence.
+>
+> For the nginx leg, `COREDNS_HOOK` is unset and the hook call is a no-op.
+
+#### 5.3.5 Parity table
+
+The following table shows that both matrix legs now exercise exactly the same
+test sequence with the same mechanism, and the only differences are the
+infrastructure-level bootstrap step and the `expose_*` overrides:
+
+| Step | nginx leg | gateway-api leg |
+|------|-----------|----------------|
+| Cluster bootstrap | `kind_with_nginx.sh` | `kind_with_envoy_gateway.sh` |
+| Ingress controller | nginx (SSL passthrough) | Envoy Gateway (TLSRoute + HTTPRoute) |
+| CoreDNS override | Applied inside `kind_with_nginx.sh` (immediately) | Applied via `COREDNS_HOOK` after Gateway resource is created |
+| `INGRESS_TYPE` | `nginx` | `gateway-api` |
+| `expose_peer_operations` | N/A (nginx always exposes all) | `true` (CI Scenario B — `wait_for()` polls via gateway) |
+| `expose_orderer_operations` | N/A | `true` |
+| Unique run ID stamping | ✅ `run-tests.sh` (both legs) | ✅ same |
+| Connection var injection | ✅ `run-tests.sh` (both legs) | ✅ same |
+| Tutorial sequence | `build_network.sh build` → `join_network.sh join` → `deploy_smart_contract.sh` | ✅ identical |
+| Cleanup | `join_network.sh destroy` | ✅ identical |
+| Collection build | ✅ shared step | ✅ same |
+| Fabric binaries | v2.4.7 (shared step) | ✅ same |
 
 ---
 
@@ -1072,20 +1325,40 @@ support.
 A migration is considered complete when all of the following pass:
 
 1. **[BOTH]** `ansible-lint` and `yamllint` pass on all modified files.
-2. **[NGINX]** All existing integration tests pass with `ingress_type: nginx`
+2. **[BOTH — CI runner]** `run-tests.sh` executes successfully with no positional
+   arguments (the existing `$1`/`$2` crash is fixed). `fvtest.yml` sets all required
+   env vars (`API_ENDPOINT`, `API_AUTHTYPE`, `API_KEY`, `API_SECRET`, `K8S_NAMESPACE`,
+   `KUBECONFIG`) via `$GITHUB_ENV` before calling `run-tests.sh`.
+3. **[BOTH — parity]** Both matrix legs (`nginx` and `gateway-api`) run the same
+   tutorial sequence — `build_network.sh build` → `join_network.sh join` →
+   `deploy_smart_contract.sh` — with unique run IDs stamped into vars files by
+   `run-tests.sh` via `yq`, identical to the mechanism in `run-tutorial-tests.sh`.
+4. **[NGINX]** All existing integration tests pass with `ingress_type: nginx`
    (or unset) without modification. `roles/fabric_operator_crds/tasks/k8s/create.yml`
    is byte-for-byte identical to its pre-migration state when `ingress_type == 'nginx'`.
-3. **[GW]** A KIND cluster bootstrapped with `kind_with_envoy_gateway.sh` and
+5. **[GW]** A KIND cluster bootstrapped with `kind_with_envoy_gateway.sh` and
    `ingress_type: gateway-api` passes the full integration test suite.
-4. **[GW]** Peer `api_url` resolves to port 7051; orderer `api_url` resolves to
+6. **[GW — topology]** The CI runs in **Scenario B** (Ansible runner outside the
+   cluster): the runner dials peer `api_url` (`CORE_PEER_ADDRESS`), orderer
+   `api_url` (`--orderer`), CA `api_url` (fabric-sdk-py enrolment), and all
+   `operations_url` endpoints (`/healthz` via `wait_for()`) through the gateway's
+   `hostPort` mappings. `ANSIBLE_EXTRA_VARS` must include `expose_peer_operations=true`
+   and `expose_orderer_operations=true`. (See PRE-ANALYSIS §2.5.3.)
+7. **[GW — CoreDNS]** The CoreDNS override is applied via `COREDNS_HOOK` **between**
+   `build_network.sh build` and `join_network.sh join` (after the `fabric-gateway`
+   Gateway resource exists), and correctly resolves `*.localho.st` to the Envoy
+   Gateway service ClusterIP.
+8. **[GW]** Peer `api_url` resolves to port 7051; orderer `api_url` resolves to
    port 7050; both reach their pod TLS stack without termination at the gateway
    (verified by comparing the TLS certificate presented at the gateway address
    against the `tls_cert` stored in the console).
-5. **[GW]** Console and CA HTTPS endpoints are TLS-terminated at the gateway
+9. **[GW]** Console and CA HTTPS endpoints are TLS-terminated at the gateway
    (verified by inspecting the serving certificate CN).
-6. **[GW]** A `fabric-sdk-py` channel join and peer query succeed end-to-end over
-   the Gateway API path.
-7. **[GW]** The CoreDNS override is applied **after** the Ansible playbook creates
-   the `Gateway` resource (not before), and correctly resolves `*.localho.st` to
-   the Envoy Gateway service ClusterIP.
-8. **[BOTH]** Documentation builds without warnings (`make -C docs html`).
+10. **[GW]** A `fabric-sdk-py` channel join and peer query succeed end-to-end over
+    the Gateway API path.
+11. **[BOTH]** Documentation builds without warnings (`make -C docs html`).
+12. **[FUTURE]** A separate workstream (out of scope for this migration) will
+    investigate replacing `wait_for()` HTTP-poll calls with `kubernetes.core.k8s_info`
+    readiness watches, which would make `expose_peer_operations` and
+    `expose_orderer_operations` unnecessary and enable true Scenario A CI.
+    (See PRE-ANALYSIS §2.5.4.)

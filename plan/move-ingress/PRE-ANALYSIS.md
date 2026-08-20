@@ -423,6 +423,122 @@ count and simplifies the `HTTPRoute` template. The `expose_grpcweb: false` defau
 reflects the reality that gRPC-Web routes are never needed for Ansible automation;
 they are opt-in for human-facing console deployments.
 
+### 2.5 Actual CI topology — Scenario B, not Scenario A
+
+The question of whether the current integration test suite already operates as
+Scenario A (in-cluster, all services reachable via ClusterIP) or Scenario B
+(out-of-cluster, all services reachable via the ingress) can be answered directly
+from the CI scripts and module code.
+
+#### 2.5.1 Where the Ansible control machine runs in CI
+
+The GitHub Actions workflow ([`.github/workflows/fvtest.yml`](./../../../.github/workflows/fvtest.yml))
+runs the Ansible playbooks directly on the **GitHub Actions runner**, which is a
+Ubuntu VM **outside** the KIND cluster. The relevant sequence is:
+
+1. `kind_with_nginx.sh` — creates the KIND cluster, installs nginx, applies the
+   CoreDNS override, all on the runner's Docker daemon.
+2. `kubectl config view --raw` — saves a kubeconfig with the API server address
+   rewritten to the runner's LAN IP (via `get-host-ip.sh`).
+3. `.github/scripts/run-tests.sh` — runs `build_network.sh build` then
+   `join_network.sh join` from `tutorial/`, all on the **runner**, not inside any
+   pod.
+
+The tutorial `ansible-playbook` invocations run as a subprocess of the runner shell
+— `hosts: localhost` in every playbook means "the runner itself". This is
+unambiguously **outside** the cluster.
+
+#### 2.5.2 How the runner reaches peer, orderer, and CA endpoints
+
+The `fabric-operator` sets the `api_url` of each `IBPPeer`, `IBPOrderer`, and
+`IBPCA` to a hostname of the form `<component>-api.<ingress-domain>` — in CI,
+`ingress-domain` is a `nip.io` address derived from the runner's IP
+(`TEST_NETWORK_INGRESS_DOMAIN=$(echo $KIND_API_SERVER_ADDRESS | tr -s '.' '-').nip.io`).
+
+These hostnames are stored in the console component registry. When the Ansible
+modules call `peers.py:_get_environ()`, `ordering_services.py:_get_ordering_service()`,
+or `certificate_authorities.py:wait_for()`, they parse the `api_url` / `operations_url`
+out of the console registry and connect directly to that hostname from the runner.
+
+On the runner, the `*.nip.io` domain name resolves to the runner's own LAN IP,
+which is forwarded through the KIND `hostPort: 443` mapping into the nginx ingress
+controller pod, and from there through the TLS-passthrough route to the target pod.
+
+**Every direct connection from Ansible to a Fabric node (peer gRPC, orderer gRPC,
+CA HTTPS, operations `/healthz`) therefore traverses the external ingress — the
+cluster's nginx controller — in the current CI.** There is no in-cluster shortcut.
+
+#### 2.5.3 Consequence for the `expose_*` defaults and the Gateway API CI path
+
+Because the CI is Scenario B, the Gateway API CI path **must** expose all services
+externally — the same set that nginx currently exposes. The `expose_*` variable
+defaults must all be `true` (as specified in §2.4.4 and W1 of the migration plan)
+for the CI tests to pass.
+
+Specifically:
+- `expose_ca: true` — required: the runner calls CA `api_url` for enrolment and
+  `operations_url` for `/healthz` during `wait_for()`.
+- `expose_peer: true` — required: the runner uses peer `api_url` as
+  `CORE_PEER_ADDRESS` for all `peer channel` and `peer lifecycle chaincode`
+  subprocesses.
+- `expose_orderer: true` — required: the runner uses orderer `api_url` as
+  `--orderer` in all `peer channel fetch/update` subprocesses.
+- `expose_peer_operations: true` — **also required for CI**: the runner calls
+  `operations_url/healthz` to wait for peer startup. The default in W1 is `false`
+  (recommending the `kubernetes.core.k8s_info` alternative), but the current
+  `wait_for()` implementation uses the HTTP poll. Until `wait_for()` is replaced
+  with a `k8s_info` readiness watch, the CI must set this to `true`.
+- `expose_orderer_operations: true` — same reasoning as peer operations.
+- `expose_grpcweb: false` — no `grpcwp_url` is called by any tutorial playbook or
+  any module used in CI; this can remain `false`.
+
+The CI bootstrap script (`kind_with_envoy_gateway.sh`, W2) must therefore provision
+the KIND cluster with **four** exposed ports:
+- `:443` — HTTPS listener (console, CA, operations, gRPC-Web)
+- `:7050` — orderer gRPC passthrough
+- `:7051` — peer gRPC passthrough
+
+And the CI vars override file must include:
+
+```yaml
+expose_ca: true
+expose_peer: true
+expose_orderer: true
+expose_peer_operations: true
+expose_orderer_operations: true
+expose_grpcweb: false
+```
+
+This differs from the `expose_peer_operations: false` / `expose_orderer_operations: false`
+**defaults** in `fabric_operator_crds/defaults/main.yml`, which are set for
+production deployments where the `kubeconfig`-based readiness alternative is
+available. The CI override makes the difference explicit rather than hiding it in the
+default values.
+
+#### 2.5.4 Path to a true Scenario A CI
+
+Migrating to Scenario A CI (no external routes for peer/orderer/CA) would require:
+1. Replacing `certificate_authorities.py:wait_for()` with a `kubernetes.core.k8s_info`
+   readiness watch on the `IBPCA` resource's `status.conditions`.
+2. Replacing `peers.py:wait_for()` and `ordering_services.py:wait_for()` with
+   equivalent `k8s_info` watches on `IBPPeer` and `IBPOrderer`.
+3. Running the Ansible control machine as a pod inside the cluster (e.g. a
+   `Job` resource in the CI namespace), or accepting that the runner uses the
+   Kubernetes API (kubeconfig) for readiness — which does not require any gateway
+   route — and still uses the external gateway for the `peer` CLI subprocesses.
+
+Step 3 has a subtlety: the `peer` CLI subprocesses in `peers.py` and
+`ordering_services.py` always use `api_url.netloc` as the gRPC address. If Ansible
+runs on the runner (outside the cluster), that address must be externally routable.
+If Ansible runs inside the cluster, the operator could set `api_url` to the pod's
+ClusterIP service name, and no external route would be needed.
+
+Full Scenario A CI is therefore a **separate future workstream** (beyond the scope
+of the ingress-nginx → Gateway API migration) that would require changes to the
+`wait_for()` implementations and potentially the playbook execution model. It is
+noted here for completeness; the migration plan targets Scenario B CI as the
+immediate deliverable.
+
 ---
 
 ## 3. Current ingress-nginx Integration — Complete Touch-point Audit
