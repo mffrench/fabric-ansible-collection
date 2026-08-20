@@ -234,10 +234,14 @@ either be contributed there or maintained locally in the CI script.
 ### 4.1 What it is
 
 The [Kubernetes Gateway API](https://gateway-api.sigs.k8s.io/) (`gateway.networking.k8s.io`)
-is the SIG-Network successor to `networking.k8s.io/Ingress`. It is GA as of v1.0
-(December 2023) and is built into Kubernetes 1.28+. It separates concerns across
-three resource levels: `GatewayClass` (infrastructure), `Gateway` (instance),
-`HTTPRoute` / `TLSRoute` / `TCPRoute` (application traffic).
+is the SIG-Network successor to `networking.k8s.io/Ingress`. It reached GA with
+v1.0 (December 2023); the current release is **v1.5 (April 2026)**. It separates
+concerns across three resource levels: `GatewayClass` (infrastructure), `Gateway`
+(instance), `HTTPRoute` / `TLSRoute` / `TCPRoute` (application traffic).
+
+As of v1.5, `TLSRoute` has been **promoted to the Standard channel (GA)** — it is
+no longer an experimental or beta resource. See the [Gateway API v1.5 release
+blog](https://kubernetes.io/blog/2026/04/21/gateway-api-v1-5/).
 
 A `Gateway` resource carries **multiple independent listeners**, each with its own
 port, protocol mode, and TLS configuration. This makes port-based protocol
@@ -284,16 +288,16 @@ spec:
 the `grpc-passthrough` listener and use `sniHosts` to select individual node
 backends. This is structurally identical to the Istio approach described in §5.
 
-**Key constraint:** `TLSRoute` is still a **beta** resource in Gateway API v1.1,
-and only some implementations support it today.
-Implementations with confirmed passthrough support include:
+With `TLSRoute` now GA in v1.5, the implementation landscape has broadened.
+Implementations with confirmed `TLSRoute` passthrough support include:
 
 * **Envoy Gateway** (v1.0+, CNCF project)
 * **Contour** (v1.28+)
 * **NGINX Gateway Fabric** — a new Gateway API–native NGINX project (distinct from ingress-nginx)
 
-Cloud-managed controllers (AWS ALB, GKE Gateway, Azure AG) do **not** yet support
-`TLSRoute passthrough` mode.
+Cloud-managed controllers (AWS ALB, GKE Gateway, Azure AG) may still lag on
+`TLSRoute passthrough` support; verify against the specific cloud provider's
+Gateway API conformance report before selecting one.
 
 ### 4.3 Migration footprint
 
@@ -344,9 +348,11 @@ strategies exist:
 
 ### 4.6 Cons
 
-* `TLSRoute` is still beta; limited implementation choice.
+* `TLSRoute` is GA in v1.5 but implementation adoption in cloud-managed controllers
+  is still incomplete; self-managed controllers (Envoy Gateway, Contour, NGF) are
+  the reliable choice today.
 * Requires operator-side changes to replace `Ingress` with `HTTPRoute` / `TLSRoute`.
-* No single "cloud-neutral" implementation handles all Fabric protocols today.
+* No single cloud-managed implementation handles all Fabric protocols today.
 
 ---
 
@@ -422,7 +428,7 @@ ports) causes connection failures that are difficult to diagnose. This is the
 
 | Criterion | Gateway API (Envoy Gateway / NGF) | Istio |
 |-----------|----------------------------------|-------|
-| **TLS passthrough** | ✅ `TLSRoute` (beta resource) | ✅ `Gateway tls.PASSTHROUGH` (stable) |
+| **TLS passthrough** | ✅ `TLSRoute` (GA in v1.5) | ✅ `Gateway tls.PASSTHROUGH` (stable) |
 | **Port-based protocol segregation** | ✅ Multiple listeners on one `Gateway` | ✅ Dedicated ports on Istio `Gateway` |
 | **Protocol awareness** | Limited (port / SNI only at gateway) | High (L7 gRPC + L4 TLS awareness) |
 | **Operator-side changes needed** | Yes — operator must emit `HTTPRoute`/`TLSRoute` | Yes — operator must emit `VirtualService`/`DestinationRule` |
@@ -478,15 +484,16 @@ automatically. **The plan must either:**
   and synthesises equivalent `HTTPRoute` / `TLSRoute` resources (a transitional
   approach that accumulates technical debt).
 
-### 8.2 TLSRoute stability and implementation selection
+### 8.2 Gateway API version pin and implementation selection
 
-`TLSRoute` is a beta resource in Gateway API v1.1. The CI bootstrap script must
-**pin a specific Gateway API version** and a specific implementation (e.g. Envoy
-Gateway v1.x) to ensure `TLSRoute` is available. The current script
-[`kind_with_nginx.sh`](../../.github/scripts/kind_with_nginx.sh) pins
-`controller-v1.1.2` of ingress-nginx via a kustomize ref; the new
-`kind_with_envoy_gateway.sh` must pin an equivalent stable Envoy Gateway release
-tag. The nginx script itself is unchanged and continues to serve the legacy CI path.
+`TLSRoute` was promoted to the Standard channel (GA) in Gateway API **v1.5**
+(April 2026). The CI bootstrap script must therefore target **Gateway API v1.5 or
+later** using the **standard install manifest** (not the experimental channel).
+The current script [`kind_with_nginx.sh`](../../.github/scripts/kind_with_nginx.sh)
+pins `controller-v1.1.2` of ingress-nginx via a kustomize ref; the new
+`kind_with_envoy_gateway.sh` must pin a compatible Envoy Gateway release tag
+(Envoy Gateway v1.3+ supports `TLSRoute` as GA). The nginx script itself is
+unchanged and continues to serve the legacy CI path.
 
 ### 8.3 RBAC extension for the operator
 
@@ -575,8 +582,8 @@ The GitHub Actions workflow relies on
 the cluster prerequisite (ingress-nginx + CoreDNS) before any Ansible playbook
 runs. A new parallel script `kind_with_envoy_gateway.sh` must:
 1. Create a KIND cluster with host-port mappings for `:443`, `:7050`, and `:7051`.
-2. Install the Gateway API CRDs (experimental channel, for `TLSRoute`).
-3. Install Envoy Gateway (or chosen implementation) as the `GatewayClass` controller.
+2. Install the Gateway API CRDs v1.5+ using the **standard channel** (`standard-install.yaml`); `TLSRoute` is GA and no longer requires the experimental channel.
+3. Install Envoy Gateway v1.3+ (or chosen implementation) as the `GatewayClass` controller.
 4. Apply the `GatewayClass` resource and wait for it to be `Accepted`.
 5. **Not** apply the `Gateway` resource or the CoreDNS override — these depend on
    the namespace and domain that are only known when the Ansible playbook runs.

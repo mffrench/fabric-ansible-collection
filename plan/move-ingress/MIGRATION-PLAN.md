@@ -187,7 +187,8 @@ KIND_API_SERVER_PORT=${KIND_API_SERVER_PORT:-8888}
 CONTAINER_REGISTRY_NAME=${CONTAINER_REGISTRY_NAME:-kind-registry}
 CONTAINER_REGISTRY_ADDRESS=${CONTAINER_REGISTRY_ADDRESS:-127.0.0.1}
 CONTAINER_REGISTRY_PORT=${CONTAINER_REGISTRY_PORT:-5000}
-ENVOY_GATEWAY_VERSION=${ENVOY_GATEWAY_VERSION:-v1.2.0}
+ENVOY_GATEWAY_VERSION=${ENVOY_GATEWAY_VERSION:-v1.3.0}
+GATEWAY_API_VERSION=${GATEWAY_API_VERSION:-v1.5.0}
 
 function kind_with_envoy_gateway() {
   delete_cluster
@@ -243,8 +244,8 @@ EOF
 }
 
 function install_gateway_api_crds() {
-  # Experimental channel includes TLSRoute (beta)
-  kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.1.0/experimental-install.yaml
+  # TLSRoute is GA in Gateway API v1.5 — standard channel is sufficient.
+  kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
   kubectl wait --for condition=established \
     crd/gateways.gateway.networking.k8s.io \
     crd/httproutes.gateway.networking.k8s.io \
@@ -689,7 +690,7 @@ spec:
 **New file:** `roles/endorsing_organization/templates/k8s/gateway/tlsroute-peer.yaml.j2`
 
 ```yaml
-apiVersion: gateway.networking.k8s.io/v1alpha2
+apiVersion: gateway.networking.k8s.io/v1
 kind: TLSRoute
 metadata:
   name: "{{ peer_name | lower | replace(' ', '-') }}-api"
@@ -711,7 +712,7 @@ spec:
 **New file:** `roles/ordering_organization/templates/k8s/gateway/tlsroute-orderer.yaml.j2`
 
 ```yaml
-apiVersion: gateway.networking.k8s.io/v1alpha2
+apiVersion: gateway.networking.k8s.io/v1
 kind: TLSRoute
 metadata:
   name: "{{ orderer_name | lower | replace(' ', '-') }}-api"
@@ -849,12 +850,12 @@ backwards compatibility) so callers in `peer_metadata.py` and
 
 | Milestone | Action |
 |-----------|--------|
-| **v2.1 (this plan)** | `ingress_type: nginx` is the default. `ingress_type: gateway-api` is available as beta. Deprecation notice added to nginx path documentation. |
-| **v2.2** | `ingress_type: gateway-api` promoted to stable. Nginx path still supported but produces an `ansible.builtin.warn`. |
+| **v2.1 (this plan)** | `ingress_type: nginx` is the default. `ingress_type: gateway-api` is available as a preview. Deprecation notice added to nginx path documentation. Note: `TLSRoute` is GA in Gateway API v1.5; there is no API stability concern with the Gateway API path itself. |
+| **v2.2** | `ingress_type: gateway-api` promoted to stable default. Nginx path still supported but produces an `ansible.builtin.warn`. |
 | **v2.3** | Nginx path removed. `ingress_type` default changed to `gateway-api`. |
 
 The timeline assumes upstream `fabric-operator` Gateway API support lands by v2.2;
-otherwise v2.2 is delayed until the overlay in W7 is replaced by native operator
+otherwise v2.2 is delayed until the overlay in W6 is replaced by native operator
 support.
 
 ---

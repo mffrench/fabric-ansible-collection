@@ -38,3 +38,12 @@ In the PRE-ANALYSIS.md there is following statement:
 This is not entirely correct : ingress-nginx is a pre-requirement of the fabric ansible collection and the project provision the ingress-nginx for the CI github requirement. 
 
 Can you hunt and correct any statement making think the fabric ansible collection handle ingress provisionning ? 
+
+## Kubernetes Gateway API features classification
+
+In the PRE-ANALYSIS.md, there is following statement: 
+
+`Key constraint: TLSRoute is still a beta resource in Gateway API v1.1, and only some implementations support it today.`
+
+However according to @https://kubernetes.io/blog/2026/04/21/gateway-api-v1-5/ the TLSRoute have been promoted as standard feature (and so GA). Can you double chec PRE-ANALYSIS.md and MIGRATION-PLAN.md so that you ensure coherence with the last Gateway API version ? 
+
