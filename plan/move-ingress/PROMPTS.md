@@ -47,3 +47,12 @@ In the PRE-ANALYSIS.md, there is following statement:
 
 However according to @https://kubernetes.io/blog/2026/04/21/gateway-api-v1-5/ the TLSRoute have been promoted as standard feature (and so GA). Can you double chec PRE-ANALYSIS.md and MIGRATION-PLAN.md so that you ensure coherence with the last Gateway API version ? 
 
+## Kubernetes Gateway API implementations providers comparative study
+
+I do realise now Istio is also providing a Kubernetes Gateway API implementation. Can you provide a comprehensive summary of pros and cons on the different Kubernetes Gateway API ? Can you provide advise so that for the CI testing environment and PoC we rely on the low cost solution but insuring it is compliant with Kubernetes Gateway API interface ? 
+
+## Optional exposition of Hyperledger Fabric network components 
+
+Most of the time, in a decentralized setup of an Hyperledger Fabric Network dispatched accross severals Kubernetes clusters, it will be required to expose HLF Orderers and HLF Peers. However, event in such case, it's not clear why componant like HLF CA or HLF Operator should expose endpoint to the Kubernetes Gateway API. Also, in the case where the network is initialized within one cluster only and where each organization could have their own namespace, it looks that only the Fabric Operations Console should be exposed. 
+
+In the PRE-ANALYSIS.md, can you evaluate rational of network exposition for each service and consequently look if such exposition can be optional or not within current Fabric Ansible Collection implementation ? Can you list services for which it is not possible to have optional network exposition and from there update the MIGRATION-PLAN.md to provide such options ? 

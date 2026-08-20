@@ -143,18 +143,51 @@ once the variable abstraction (§5.1) is in place.
 
 **File:** `roles/fabric_operator_crds/defaults/main.yml`
 
-Add `ingress_type: nginx` as a new default. Also add `ingress_grpc_orderer_port`
-and `ingress_grpc_peer_port` to allow overrides:
+Add `ingress_type: nginx` as a new default. Also add `ingress_grpc_orderer_port`,
+`ingress_grpc_peer_port`, `gateway_class_name`, and the per-service `expose_*`
+boolean flags derived from the exposition analysis in PRE-ANALYSIS §2.4:
 
 ```yaml
 # Ingress controller type: nginx | gateway-api
 ingress_type: nginx
+
+# Gateway API path only: the GatewayClass name installed as a cluster prerequisite.
+# The default targets Envoy Gateway (CI/PoC). Override to use any conformant
+# implementation without changing any other template:
+#   istio            → Istio Gateway API mode
+#   nginx            → NGINX Gateway Fabric
+#   cilium           → Cilium Gateway API
+gateway_class_name: fabric-envoy-gateway
 
 # Gateway API path only: external ports for TLS passthrough listeners.
 # These must match the Gateway listener ports and the hostPort mappings
 # in the KIND node configuration for local development.
 ingress_grpc_orderer_port: 7050
 ingress_grpc_peer_port: 7051
+
+# Gateway API path only: per-service exposition flags.
+#
+# These control which HTTPRoute / TLSRoute resources are created by W6 post-tasks.
+# Defaults are production-safe (all externally-accessed services exposed).
+# In-cluster deployments (Scenario A — CI pod, GitOps, trusted lead-org bootstrap)
+# can set expose_ca / expose_peer / expose_orderer to false and rely on ClusterIP
+# for Ansible reachability. See PRE-ANALYSIS §2.4 for the full rationale.
+#
+# Console is always exposed; there is no expose_console flag.
+expose_ca: true             # CA api_url + operations_url on HTTPS :443
+expose_peer: true           # Peer api_url on TLS passthrough :7051
+expose_orderer: true        # Orderer api_url on TLS passthrough :7050
+
+# Operations endpoints (/healthz) are only needed externally when the control
+# machine cannot reach the Kubernetes API for readiness checks. Default false:
+# the recommended path is to use kubernetes.core.k8s_info to watch status.conditions
+# instead of polling /healthz over an external gateway route.
+expose_peer_operations: false
+expose_orderer_operations: false
+
+# gRPC-Web proxy route is never needed by Ansible — it is consumed by browsers
+# via the Operations Console UI. Set true for human-facing deployments.
+expose_grpcweb: false
 ```
 
 These variables are consumed by the route-resource tasks (W6) and the console
@@ -189,6 +222,7 @@ CONTAINER_REGISTRY_ADDRESS=${CONTAINER_REGISTRY_ADDRESS:-127.0.0.1}
 CONTAINER_REGISTRY_PORT=${CONTAINER_REGISTRY_PORT:-5000}
 ENVOY_GATEWAY_VERSION=${ENVOY_GATEWAY_VERSION:-v1.3.0}
 GATEWAY_API_VERSION=${GATEWAY_API_VERSION:-v1.5.0}
+GATEWAY_CLASS_NAME=${GATEWAY_CLASS_NAME:-fabric-envoy-gateway}
 
 function kind_with_envoy_gateway() {
   delete_cluster
@@ -263,18 +297,20 @@ function install_envoy_gateway() {
 
 function apply_gatewayclass() {
   # Only the GatewayClass is applied here. The Gateway resource itself is
-  # created by the user's playbook (or by the test playbook), since it carries
-  # namespace and domain variables that are not known at bootstrap time.
+  # created by the Ansible playbook, since it carries namespace and domain
+  # variables that are not known at bootstrap time.
+  # GATEWAY_CLASS_NAME is overridable so the same script can test against
+  # any conformant implementation (e.g. GATEWAY_CLASS_NAME=nginx for NGF).
   kubectl apply -f - <<EOF
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
-  name: fabric-envoy-gateway
+  name: ${GATEWAY_CLASS_NAME}
 spec:
   controllerName: gateway.envoyproxy.io/gatewayclass-controller
 EOF
   kubectl wait --for=condition=Accepted \
-    gatewayclass/fabric-envoy-gateway --timeout=60s
+    gatewayclass/"${GATEWAY_CLASS_NAME}" --timeout=60s
 }
 
 function apply_coredns_override() {
@@ -659,9 +695,19 @@ This is a transitional overlay, not the end-state. A follow-up upstream PR to
 `fabric-operator` should add native Gateway API support behind a
 `INGRESS_CLASS=gateway` environment variable.
 
-#### 5.6.1 Template: `HTTPRoute` for console, CA, gRPC-Web, and operations
+**Conditionality:** each route-creation task is guarded by two conditions:
+1. `ingress_type == 'gateway-api'` — the overall path switch.
+2. The service-specific `expose_*` flag (see W1 defaults and PRE-ANALYSIS §2.4).
 
-**New file:** `roles/fabric_console/templates/k8s/gateway/httproute.yaml.j2`
+This allows in-cluster deployments (Scenario A — CI pods, GitOps, or a trusted
+lead-org hosting components for joining organisations) to suppress unnecessary
+external routes by setting `expose_peer: false`, `expose_orderer: false`, and/or
+`expose_ca: false` while still using `ingress_type: gateway-api` for the console
+route (which is always created).
+
+#### 5.6.1 Template: `HTTPRoute` for console (always created)
+
+**New file:** `roles/fabric_console/templates/k8s/gateway/httproute-console.yaml.j2`
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
@@ -685,7 +731,102 @@ spec:
           port: "{{ component_service_port }}"
 ```
 
-#### 5.6.2 Template: `TLSRoute` for peer gRPC API
+The console `HTTPRoute` task carries only `when: ingress_type == 'gateway-api'` —
+there is no `expose_console` flag because the console is always required externally
+(see PRE-ANALYSIS §2.4.3).
+
+#### 5.6.2 Template: `HTTPRoute` for CA (gated by `expose_ca`)
+
+**New file:** `roles/certificate_authority/templates/k8s/gateway/httproute-ca.yaml.j2`
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: "{{ ca_name | lower | replace(' ', '-') }}-api"
+  namespace: "{{ namespace }}"
+spec:
+  parentRefs:
+    - name: fabric-gateway
+      sectionName: https
+  hostnames:
+    - "{{ ca_api_hostname }}"     # e.g. org1ca-api.localho.st
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: "{{ ca_service }}"
+          port: 7054
+```
+
+Post-task condition: `when: ingress_type == 'gateway-api' and expose_ca | bool`
+
+#### 5.6.3 Template: `HTTPRoute` for operations endpoints (gated by `expose_*_operations`)
+
+**New file:** `roles/endorsing_organization/templates/k8s/gateway/httproute-operations.yaml.j2`
+(reused for both peer and orderer operations by varying `component_*` vars)
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: "{{ component_name }}-operations"
+  namespace: "{{ namespace }}"
+spec:
+  parentRefs:
+    - name: fabric-gateway
+      sectionName: https
+  hostnames:
+    - "{{ component_operations_hostname }}"   # e.g. org1peer-operations.localho.st
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: "{{ component_service }}"
+          port: "{{ component_operations_port }}"
+```
+
+Post-task conditions:
+- Peer: `when: ingress_type == 'gateway-api' and expose_peer_operations | bool`
+- Orderer: `when: ingress_type == 'gateway-api' and expose_orderer_operations | bool`
+
+When `expose_*_operations` is `false` (the default), the recommended alternative
+for startup readiness is `kubernetes.core.k8s_info` watching `status.conditions`
+on the `IBPPeer` / `IBPOrderer` resource — no gateway route required.
+
+#### 5.6.4 Template: `HTTPRoute` for gRPC-Web proxy (gated by `expose_grpcweb`)
+
+**New file:** `roles/endorsing_organization/templates/k8s/gateway/httproute-grpcweb.yaml.j2`
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: "{{ peer_name | lower | replace(' ', '-') }}-grpcweb"
+  namespace: "{{ namespace }}"
+spec:
+  parentRefs:
+    - name: fabric-gateway
+      sectionName: https
+  hostnames:
+    - "{{ peer_grpcweb_hostname }}"   # e.g. org1peer-grpcwebproxy.localho.st
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: "{{ peer_grpcweb_service }}"
+          port: 443
+```
+
+Post-task condition: `when: ingress_type == 'gateway-api' and expose_grpcweb | bool`
+
+#### 5.6.5 Template: `TLSRoute` for peer gRPC API (gated by `expose_peer`)
 
 **New file:** `roles/endorsing_organization/templates/k8s/gateway/tlsroute-peer.yaml.j2`
 
@@ -707,7 +848,7 @@ spec:
           port: 7051
 ```
 
-#### 5.6.3 Template: `TLSRoute` for orderer gRPC API
+#### 5.6.6 Template: `TLSRoute` for orderer gRPC API (gated by `expose_orderer`)
 
 **New file:** `roles/ordering_organization/templates/k8s/gateway/tlsroute-orderer.yaml.j2`
 
@@ -729,11 +870,11 @@ spec:
           port: 7050
 ```
 
-#### 5.6.4 Post-task in endorsing_organization
+#### 5.6.7 Post-task in endorsing_organization
 
 **File:** `roles/endorsing_organization/tasks/create.yml`
 
-After the existing peer creation tasks, add:
+After the existing peer creation tasks, add (in order):
 
 ```yaml
 - name: Create Gateway API TLSRoute for peer gRPC API
@@ -742,17 +883,45 @@ After the existing peer creation tasks, add:
     namespace: "{{ namespace }}"
     resource_definition: "{{ lookup('template',
       'templates/k8s/gateway/tlsroute-peer.yaml.j2') }}"
-  when: ingress_type == 'gateway-api'
+  when:
+    - ingress_type == 'gateway-api'
+    - expose_peer | bool
   vars:
     peer_api_hostname: "{{ peer_api_url | urlsplit('hostname') }}"
     peer_service: "{{ peer_name | lower | replace(' ', '-') }}"
+
+- name: Create Gateway API HTTPRoute for peer operations endpoint
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ namespace }}"
+    resource_definition: "{{ lookup('template',
+      'templates/k8s/gateway/httproute-operations.yaml.j2') }}"
+  when:
+    - ingress_type == 'gateway-api'
+    - expose_peer_operations | bool
+  vars:
+    component_name: "{{ peer_name | lower | replace(' ', '-') }}"
+    component_operations_hostname: "{{ peer_operations_url | urlsplit('hostname') }}"
+    component_service: "{{ peer_name | lower | replace(' ', '-') }}"
+    component_operations_port: 9443
+
+- name: Create Gateway API HTTPRoute for peer gRPC-Web proxy
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ namespace }}"
+    resource_definition: "{{ lookup('template',
+      'templates/k8s/gateway/httproute-grpcweb.yaml.j2') }}"
+  when:
+    - ingress_type == 'gateway-api'
+    - expose_grpcweb | bool
+  vars:
+    peer_grpcweb_hostname: "{{ peer_grpcwp_url | urlsplit('hostname') }}"
+    peer_grpcweb_service: "{{ peer_name | lower | replace(' ', '-') }}-grpcwebproxy"
 ```
 
-#### 5.6.5 Post-task in ordering_organization
+#### 5.6.8 Post-task in ordering_organization
 
 **File:** `roles/ordering_organization/tasks/create.yml`
-
-Same pattern:
 
 ```yaml
 - name: Create Gateway API TLSRoute for orderer gRPC API
@@ -761,18 +930,56 @@ Same pattern:
     namespace: "{{ namespace }}"
     resource_definition: "{{ lookup('template',
       'templates/k8s/gateway/tlsroute-orderer.yaml.j2') }}"
-  when: ingress_type == 'gateway-api'
+  when:
+    - ingress_type == 'gateway-api'
+    - expose_orderer | bool
   vars:
     orderer_api_hostname: "{{ orderer_api_url | urlsplit('hostname') }}"
     orderer_service: "{{ ordering_service_name | lower | replace(' ', '-') }}"
+
+- name: Create Gateway API HTTPRoute for orderer operations endpoint
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ namespace }}"
+    resource_definition: "{{ lookup('template',
+      'templates/k8s/gateway/httproute-operations.yaml.j2') }}"
+  when:
+    - ingress_type == 'gateway-api'
+    - expose_orderer_operations | bool
+  vars:
+    component_name: "{{ ordering_service_name | lower | replace(' ', '-') }}"
+    component_operations_hostname: "{{ orderer_operations_url | urlsplit('hostname') }}"
+    component_service: "{{ ordering_service_name | lower | replace(' ', '-') }}"
+    component_operations_port: 9443
 ```
 
-#### 5.6.6 Upstream contribution target
+#### 5.6.9 Post-task in certificate_authority
+
+**File:** `roles/certificate_authority/tasks/create.yml` (or the equivalent CA
+creation role)
+
+```yaml
+- name: Create Gateway API HTTPRoute for CA API
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ namespace }}"
+    resource_definition: "{{ lookup('template',
+      'templates/k8s/gateway/httproute-ca.yaml.j2') }}"
+  when:
+    - ingress_type == 'gateway-api'
+    - expose_ca | bool
+  vars:
+    ca_api_hostname: "{{ ca_api_url | urlsplit('hostname') }}"
+    ca_service: "{{ ca_name | lower | replace(' ', '-') }}"
+```
+
+#### 5.6.10 Upstream contribution target
 
 File a PR against `hyperledger-labs/fabric-operator` proposing:
 - A new env var `INGRESS_CLASS` with values `nginx` (default) and `gateway-api`.
 - When `INGRESS_CLASS=gateway-api`, the operator reconciler emits `HTTPRoute` +
-  `TLSRoute` instead of `Ingress` objects.
+  `TLSRoute` instead of `Ingress` objects, respecting the same conditionality
+  (console always, peers/orderers/CA conditional on configuration).
 - The operator's `ClusterRole` is extended to include `gateway.networking.k8s.io`
   verbs (mirrors W4 above).
 

@@ -193,6 +193,236 @@ in the `IBPPeer` / `IBPOrderer` CRD spec via the `console_versions` map
 The ingress for the gRPC-Web proxy **can** be a normal HTTP/2-capable reverse-proxy
 on the HTTPS listener.
 
+### 2.4 Network exposition rationality — which services need an external gateway and when
+
+Not every HLF service needs to be reachable from outside the cluster under every
+deployment topology. Creating a gateway route for a service that is only ever
+accessed from within the same cluster wastes listener slots and enlarges the attack
+surface unnecessarily. This section analyses each service systematically so that
+the migration plan can make route creation **conditional** where it is genuinely
+optional.
+
+#### 2.4.1 Topology scenarios
+
+Three canonical scenarios cover the vast majority of real deployments:
+
+| Scenario | Ansible control machine | Cluster topology |
+|----------|------------------------|-----------------|
+| **A — in-cluster** | Running inside the Kubernetes cluster (e.g. a CI pod, a GitOps operator, or a trusted lead-org bootstrap shell) | Single cluster — all participants share it |
+| **B — out-of-cluster, single cluster** | Running outside the cluster (developer laptop, remote runner) | Single cluster, all HLF namespaces share one cluster |
+| **C — multi-cluster / multi-org** | Running outside one or more clusters | Each organisation (or consortium member) owns a separate cluster; cross-cluster peer/orderer communication over the public internet |
+
+In practice, scenario B is the most common developer/operator experience; scenario C
+is the production pattern for organisations that do not trust a shared cluster.
+
+Scenario A arises in three distinct contexts:
+1. **CI pipelines** — a runner pod executes the playbook directly inside the cluster.
+2. **GitOps flows** — an Argo CD / Flux controller runs the Ansible playbook in-cluster.
+3. **Trusted lead-org bootstrap** — at the beginning of a network, one organisation
+   is trusted to host components for other participants (peers, CAs, or even an
+   initial orderer) within its own cluster. All Ansible automation runs from inside
+   that cluster, so there is no external traffic between the control machine and
+   the hosted components. This is a common pattern for consortium bootstrapping
+   before each member has provisioned their own independent infrastructure.
+
+In all three Scenario A sub-cases, every Fabric service is reachable from the
+control machine via `ClusterIP` or in-cluster `Service` DNS — no external gateway
+route is required for Ansible automation. External routes are still needed for
+browser access to the console and for cross-cluster Fabric traffic once other
+organisations join from outside.
+
+#### 2.4.2 How the code determines reachability requirements
+
+From the touch-point audit in §3, the Ansible control machine connects directly
+(not through the console broker) to the following endpoints:
+
+| Endpoint | Module / utils | Purpose of direct connection |
+|----------|---------------|------------------------------|
+| CA `api_url` | [`certificate_authorities.py`](../../plugins/module_utils/certificate_authorities.py) `CertificateAuthorityConnection` | `fabric-sdk-py` enroll / register calls |
+| CA `operations_url` | Same file, `wait_for()` | `/healthz` poll to confirm CA startup |
+| Peer `api_url` | [`peers.py`](../../plugins/module_utils/peers.py) `_get_environ()` | `CORE_PEER_ADDRESS` env var for `peer` CLI subprocess |
+| Peer `operations_url` | Same file, `wait_for()` | `/healthz` poll |
+| Orderer `api_url` | [`ordering_services.py`](../../plugins/module_utils/ordering_services.py) `_get_ordering_service()` | `--orderer` flag in `peer channel fetch/update` subprocess |
+| Orderer `operations_url` | Same file, `wait_for()` | `/healthz` poll |
+| Console `api_endpoint` | [`consoles.py`](../../plugins/module_utils/consoles.py) `Console` | **All** component lifecycle management (the broker) |
+
+The following endpoints are **never** called directly by any Ansible module:
+
+| Endpoint | Why not needed by Ansible |
+|----------|--------------------------|
+| `grpcwp_url` | Consumed by browser clients via the console UI; Ansible has no gRPC-Web logic |
+| Orderer `osnadmin_url` | Optional, defaults to `None`; only used by `external_ordering_service_node` for the channel participation API, and only when the caller explicitly provides it |
+| Fabric Operator health (`:8383`) | Internal Kubernetes operator health port; no external API |
+| CRD Webhook (`:443` ClusterIP) | API-server admission webhook; always internal |
+
+#### 2.4.3 Per-service exposition analysis
+
+**Console (`api_endpoint`)**
+
+The console is the broker for every component lifecycle operation and is also the
+human-facing UI. It must be reachable from the Ansible control machine **and** from
+the operator's browser in all three scenarios. There is no scenario in which the
+console is optional as an external endpoint.
+
+- Scenario A (in-cluster): the control machine can reach the console via
+  `ClusterIP` for Ansible operations, but the browser of any human operator — from
+  the lead org or a joining org — still needs an external route.
+- Scenarios B and C: the control machine is outside the cluster; an external route
+  is mandatory for Ansible as well.
+
+**Conclusion: console external gateway route is always mandatory.**
+
+---
+
+**CA `api_url`** (enroll / register)
+
+The CA `api_url` is called directly from the control machine for cryptographic
+enrolment operations (via `fabric-sdk-py`). The CA's `operations_url` is also
+polled during startup via `/healthz`.
+
+- Scenario A: the control machine can reach the CA via the in-cluster `Service`
+  DNS name. No external gateway route is needed.
+- Scenarios B and C: the control machine is outside the cluster. An external
+  gateway route on the HTTPS listener (`:443`) is required.
+
+**Conclusion: CA external gateway route is mandatory when the control machine is
+outside the cluster (Scenarios B and C); optional in Scenario A. The `expose_ca`
+variable should default to `true` and be set to `false` only for fully in-cluster
+automation.**
+
+---
+
+**Peer `api_url`** (gRPC channel operations)
+
+The peer `api_url` is used as `CORE_PEER_ADDRESS` for all `peer` CLI subprocesses
+(channel fetch, channel update, chaincode install, etc.). The `operations_url` is
+also polled during startup.
+
+- Scenario A: the control machine can reach the peer via `ClusterIP`.
+- Scenario B: an out-of-cluster control machine requires an external gateway route
+  on the TLS passthrough listener (`:7051` under the recommended model).
+- Scenario C: peers in different clusters must be reachable by remote control
+  machines and by peers / orderers in other clusters — both via the external gateway.
+
+In Scenario A (trusted lead-org), peers hosted for another organisation are accessed
+by the lead org's in-cluster control machine without any external route. When that
+other organisation later migrates its components to its own cluster (Scenario C),
+it will supply its own external gateway. No interim external route is needed for
+the hosted phase.
+
+Additional dimension: **peer-to-peer gossip traffic** within a single cluster uses
+`ClusterIP`. In a multi-cluster deployment, gossip must traverse the external
+gateway, but it uses the same TLS passthrough route as the gRPC API (`externalEndpoint`
+in the `IBPPeer` CRD already encodes this).
+
+**Conclusion: peer external gateway route is mandatory for out-of-cluster Ansible
+(Scenarios B and C); optional in Scenario A. The `expose_peer` variable should
+default to `true`.**
+
+---
+
+**Orderer `api_url`** (channel lifecycle)
+
+Same analysis as the peer. The orderer `api_url` is passed as `--orderer` to the
+`peer` CLI for `channel fetch` and `channel update`.
+
+- Scenario A: reachable via `ClusterIP`.
+- Scenarios B and C: requires an external gateway route on the orderer TLS passthrough
+  listener (`:7050`).
+
+In a multi-cluster consortium, orderer endpoints must be reachable by peers and
+Ansible control machines in other clusters. In the trusted lead-org Scenario A
+bootstrap, orderers provisioned for a joining org are reached in-cluster by the
+lead org's playbook; no external route is needed until the joining org takes
+ownership of its own cluster.
+
+**Conclusion: orderer external gateway route is mandatory for Scenarios B and C;
+optional in Scenario A. The `expose_orderer` variable should default to `true`.**
+
+---
+
+**Peer `operations_url` and Orderer `operations_url`**
+
+The operations endpoint (`/healthz`) is polled exclusively by the `wait_for()`
+helper in `peers.py` and `ordering_services.py` to confirm node startup. It is
+never called by any external client or by another Fabric node.
+
+- Scenario A: reachable via `ClusterIP`.
+- Scenarios B and C: the control machine is outside the cluster. An HTTPS route on
+  the `:443` listener would expose it, but this is not the only option — the startup
+  poll can equivalently be replaced by watching the resource's `status.conditions`
+  via the Kubernetes API (always accessible to an authenticated `kubeconfig`), which
+  requires no gateway route at all.
+
+**Conclusion: operations endpoint external routes are conditionally required
+(mandatory for Scenario B/C with the current `wait_for()` implementation; avoidable
+by switching to `kubernetes.core.k8s_info` readiness watches). The
+`expose_peer_operations` and `expose_orderer_operations` variables should default to
+`false` and be enabled only when the `kubeconfig`-based alternative is not
+available.**
+
+---
+
+**gRPC-Web proxy (`grpcwp_url`)**
+
+The `grpcwp_url` is stored in the console component registry but is never read by
+any Ansible module. It exists solely for browser clients using the Operations
+Console UI to submit transactions via gRPC-Web from a browser context.
+
+- In automated / headless deployments (CI, GitOps, lead-org bootstrap) the console
+  REST API is used and `grpcwp_url` is never exercised by Ansible.
+- Human-facing console deployments need it to enable transaction submission from the
+  browser, but this is an optional feature.
+
+**Conclusion: gRPC-Web proxy external route is optional in all scenarios from
+Ansible's perspective. The `expose_grpcweb` variable should default to `false`
+(CI / automated contexts); human-facing deployments opt in by setting it to `true`.**
+
+---
+
+**Fabric Operator (`:8383` TCP health)**
+
+The operator's health port is an internal Kubernetes liveness/readiness probe
+endpoint consumed by the API server, not by external clients or by Ansible. It is
+not and should never be gateway-routed.
+
+**Conclusion: no external route required, ever.**
+
+---
+
+**CRD Webhook (hlfsupport variant)**
+
+The admission webhook (`:3000` in the container, ClusterIP `:443`) is consumed by
+the Kubernetes API server at admission time. It must be a `ClusterIP` service by
+design and cannot be meaningfully exposed through an ingress or gateway.
+
+**Conclusion: no external route required, ever.**
+
+---
+
+#### 2.4.4 Summary matrix
+
+| Service | Scenario A (in-cluster) | Scenario B (out-of-cluster, single) | Scenario C (multi-cluster) | Default `expose_*` | Listener |
+|---------|------------------------|------------------------------------|-----------------------------|-------------------|---------|
+| Console `api_endpoint` | ✅ mandatory (browser) | ✅ mandatory | ✅ mandatory | always on | HTTPS `:443` |
+| CA `api_url` | ❌ optional (ClusterIP) | ✅ mandatory | ✅ mandatory | `expose_ca: true` | HTTPS `:443` |
+| Peer `api_url` (gRPC) | ❌ optional | ✅ mandatory | ✅ mandatory | `expose_peer: true` | TLS passthrough `:7051` |
+| Orderer `api_url` (gRPC) | ❌ optional | ✅ mandatory | ✅ mandatory | `expose_orderer: true` | TLS passthrough `:7050` |
+| Peer `operations_url` | ❌ optional | ⚠️ conditional | ⚠️ conditional | `expose_peer_operations: false` | HTTPS `:443` |
+| Orderer `operations_url` | ❌ optional | ⚠️ conditional | ⚠️ conditional | `expose_orderer_operations: false` | HTTPS `:443` |
+| gRPC-Web proxy `grpcwp_url` | ❌ not used by Ansible | ❌ not used by Ansible | ❌ not used by Ansible | `expose_grpcweb: false` | HTTPS `:443` |
+| Operator health (`:8383`) | ❌ never | ❌ never | ❌ never | — (no variable) | N/A |
+| CRD Webhook | ❌ never | ❌ never | ❌ never | — (no variable) | N/A |
+
+The defaults represent a production-safe baseline where every externally-accessed
+service is exposed by default (Scenarios B and C). In-cluster deployments (Scenario A
+— CI, GitOps, or trusted lead-org bootstrap) gain no performance benefit from
+disabling routes in KIND + Envoy Gateway, but setting `expose_peer_operations: false`,
+`expose_orderer_operations: false`, and `expose_grpcweb: false` reduces the route
+count and simplifies the `HTTPRoute` template. The `expose_grpcweb: false` default
+reflects the reality that gRPC-Web routes are never needed for Ansible automation;
+they are opt-in for human-facing console deployments.
+
 ---
 
 ## 3. Current ingress-nginx Integration — Complete Touch-point Audit
@@ -289,24 +519,36 @@ the `grpc-passthrough` listener and use `sniHosts` to select individual node
 backends. This is structurally identical to the Istio approach described in §5.
 
 With `TLSRoute` now GA in v1.5, the implementation landscape has broadened.
-Implementations with confirmed `TLSRoute` passthrough support include:
+See [`GATEWAY-API-IMPLEMENTATIONS.md`](./GATEWAY-API-IMPLEMENTATIONS.md) for a
+full comparison. A summary of implementations with confirmed `TLSRoute` passthrough
+support:
 
-* **Envoy Gateway** (v1.0+, CNCF project)
-* **Contour** (v1.28+)
-* **NGINX Gateway Fabric** — a new Gateway API–native NGINX project (distinct from ingress-nginx)
+| Implementation | Footprint | `TLSRoute` GA | mTLS conflict risk | CI/PoC suitability |
+|---|---|---|---|---|
+| **Envoy Gateway v1.3+** | Minimal (2 pods) | ✅ | None | ✅ Recommended |
+| **NGINX Gateway Fabric v2+** | Minimal (2 pods) | ✅ | None | ✅ Viable |
+| **Contour v1.28+** | Moderate | ✅ | None | ⚠️ Heavier than needed |
+| **Istio v1.22+ (sidecar)** | Heavy (sidecar per pod) | ✅ | ⚠️ High | ❌ Not recommended for CI |
+| **Istio v1.22+ (ambient)** | Moderate (ztunnel DaemonSet) | ✅ | Low | ⚠️ If already using Istio |
+| **Cilium v1.16+** | CNI-integrated | ⚠️ Partial passthrough | None | ⚠️ CNI-dependent |
+| **GKE / AWS ALB / Azure AGFC** | Cloud-managed | ❌ | N/A | ❌ No passthrough |
 
-Cloud-managed controllers (AWS ALB, GKE Gateway, Azure AG) may still lag on
-`TLSRoute passthrough` support; verify against the specific cloud provider's
-Gateway API conformance report before selecting one.
+**Important:** the collection's Ansible templates use **only standard Gateway API
+resources** (`GatewayClass`, `Gateway`, `HTTPRoute`, `TLSRoute`). The
+implementation-specific element is the `GatewayClass` name only, which is exposed
+as a variable (`gateway_class_name`). Users can therefore substitute any conformant
+implementation in production without changing any template.
 
 ### 4.3 Migration footprint
 
 A Gateway API migration would produce:
 
 1. **A new CI bootstrap script** (`kind_with_envoy_gateway.sh`) that installs
-   the `GatewayClass` + Envoy Gateway controller as a cluster prerequisite,
-   replacing the nginx installation step in `kind_with_nginx.sh`. Production
-   cluster administrators follow the same pattern manually.
+   the `GatewayClass` + Envoy Gateway controller as a cluster prerequisite (Envoy
+   Gateway being the recommended CI/PoC implementation — see
+   [`GATEWAY-API-IMPLEMENTATIONS.md`](./GATEWAY-API-IMPLEMENTATIONS.md) §4).
+   Production cluster administrators install their preferred conformant
+   implementation instead.
 2. **A `Gateway` manifest** (namespace-scoped, domain-parameterised) applied by
    the `fabric_operator_crds` role with two listeners (`:443 HTTPS` and
    `:7050`/`:7051 TLS Passthrough`). Unlike the controller itself, the `Gateway`
@@ -448,24 +690,32 @@ runtime weight, mTLS conflict risk, and API standardisation.
 
 ## 7. Recommendation
 
-**Primary recommendation: Kubernetes Gateway API with Envoy Gateway as the implementation.**
+**Primary recommendation: Kubernetes Gateway API, with Envoy Gateway as the
+reference implementation for CI and PoC.**
 
 Rationale:
-1. Port-based protocol segregation and `TLSRoute passthrough` cover all Fabric
-   routing requirements without introducing a mesh control-plane.
-2. Envoy Gateway is a CNCF project with Gateway API–conformant `TLSRoute` support,
-   a small footprint, and an active community.
-3. Kubernetes Gateway API is the direction the Kubernetes community has chosen; the
+1. Port-based protocol segregation and `TLSRoute passthrough` (GA in v1.5) cover
+   all Fabric routing requirements without introducing a mesh control-plane.
+2. The collection uses **only standard Gateway API resources**; the
+   implementation-specific element is the `gateway_class_name` variable only.
+   This guarantees portability: production users running Istio, Contour, or NGF
+   swap in their implementation without changing any Ansible template.
+3. Envoy Gateway is the recommended CI/PoC implementation: smallest footprint
+   (2 pods), highest conformance score, no mTLS conflict risk, and no extra CRDs.
+4. Kubernetes Gateway API is the direction the Kubernetes community has chosen; the
    `fabric-operator` upstream will inevitably move there as `networking.k8s.io/Ingress`
    is eventually deprecated.
-4. No risk of double-mTLS conflict between Istio and Fabric TLS chains.
-5. No per-pod sidecar overhead on Fabric nodes.
-6. The migration surface in this collection is well-contained (see §3).
+5. No risk of double-mTLS conflict between Istio and Fabric TLS chains (unlike the
+   Istio sidecar option).
+6. No per-pod sidecar overhead on Fabric nodes.
+7. The migration surface in this collection is well-contained (see §3).
 
-**Secondary / longer-term option: Istio** — appropriate if the deployment already
-runs an Istio mesh for other workloads, or if the full observability and
-fine-grained traffic-policy features of a service mesh are desired.
-Istio's Gateway API compatibility layer means the two paths converge over time.
+**For deployments already running Istio:** Istio v1.22+ implements the Kubernetes
+Gateway API natively. Users can set `gateway_class_name: istio` and use the
+**same `HTTPRoute` and `TLSRoute` templates** without modification. With ambient
+mode (Istio v1.22+) the sidecar mTLS conflict risk is also significantly reduced.
+See [`GATEWAY-API-IMPLEMENTATIONS.md`](./GATEWAY-API-IMPLEMENTATIONS.md) §2.2 for
+the full Istio analysis.
 
 ---
 
