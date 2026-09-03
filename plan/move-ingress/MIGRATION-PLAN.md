@@ -73,7 +73,7 @@ and the upstream Fabric documentation:
 | Fabric Orderer — OSN Admin | HTTPS REST | **9443** | HTTPS reverse-proxy |
 | Fabric Peer — gRPC API | gRPC over mTLS | **7051** | TLS passthrough |
 | Fabric Peer — Operations | HTTPS REST | **9443** | HTTPS reverse-proxy |
-| Fabric CA — API + Operations | HTTPS REST | **7054** | HTTPS reverse-proxy |
+| Fabric CA — API + Operations | HTTPS REST | **7054** | TLS passthrough |
 | Fabric Operations Console | HTTPS | **443** (via `IBPConsole`) | HTTPS reverse-proxy |
 | Fabric Operator | Internal health only (`:8383` TCP) | — | **Not ingress-routed** |
 | CRD Webhook (hlfsupport) | HTTPS (`:3000` container → `:443` ClusterIP) | — | **Not ingress-routed** (ClusterIP only) |
@@ -81,20 +81,22 @@ and the upstream Fabric documentation:
 
 ### 2.2 Gateway listener topology
 
-Under the Gateway API path, a single `Gateway` resource carries **three listeners**,
+Under the Gateway API path, a single `Gateway` resource carries **four listeners**,
 each covering one protocol class. SNI within each passthrough listener distinguishes
 individual nodes.
 
 | Listener name | External port | Protocol mode | Serves |
 |---------------|--------------|---------------|--------|
-| `https` | **443** | `HTTPS` — TLS terminated at gateway | Console, CA, gRPC-Web proxy, Orderer OSN Admin, Peer Operations |
+| `https` | **443** | `HTTPS` — TLS terminated at gateway | Console, gRPC-Web proxy, Orderer OSN Admin, Peer Operations |
+| `ca-passthrough` | **7054** | `TLS` — Passthrough | All Fabric CA API and operations endpoints |
 | `orderer-passthrough` | **7050** | `TLS` — Passthrough | All orderer gRPC API endpoints |
 | `peer-passthrough` | **7051** | `TLS` — Passthrough | All peer gRPC API endpoints |
 
 This means:
 - `api_url` for orderers changes from `grpcs://<host>:443` (or `:32000`) to `grpcs://<host>:7050`.
 - `api_url` for peers changes to `grpcs://<host>:7051`.
-- `grpcwp_url`, `operations_url`, CA `api_url`, and console URLs remain on `:443`.
+- CA `api_url` and `operations_url` use TLS passthrough on `:7054`.
+- `grpcwp_url`, peer and orderer `operations_url`, and console URLs remain on `:443`.
 
 ### 2.3 Legacy nginx listener topology (unchanged)
 
@@ -143,8 +145,8 @@ once the variable abstraction (§5.1) is in place.
 
 **File:** `roles/fabric_operator_crds/defaults/main.yml`
 
-Add `ingress_type: nginx` as a new default. Also add `ingress_grpc_orderer_port`,
-`ingress_grpc_peer_port`, `gateway_class_name`, and the per-service `expose_*`
+Add `ingress_type: nginx` as a new default. Also add `ingress_ca_port`,
+`ingress_grpc_orderer_port`, `ingress_grpc_peer_port`, `gateway_class_name`, and the per-service `expose_*`
 boolean flags derived from the exposition analysis in PRE-ANALYSIS §2.4:
 
 ```yaml
@@ -159,6 +161,7 @@ gateway_class_name: fabric-envoy-gateway
 # Gateway API path only: external ports for TLS passthrough listeners.
 # These must match the Gateway listener ports and the hostPort mappings
 # in the KIND node configuration for local development.
+ingress_ca_port: 7054
 ingress_grpc_orderer_port: 7050
 ingress_grpc_peer_port: 7051
 
@@ -171,7 +174,7 @@ ingress_grpc_peer_port: 7051
 # for Ansible reachability. See PRE-ANALYSIS §2.4 for the full rationale.
 #
 # Console is always exposed; there is no expose_console flag.
-expose_ca: true             # CA api_url + operations_url on HTTPS :443
+expose_ca: true             # CA api_url + operations_url on TLS passthrough :7054
 expose_peer: true           # Peer api_url on TLS passthrough :7051
 expose_orderer: true        # Orderer api_url on TLS passthrough :7050
 
@@ -236,7 +239,7 @@ function delete_cluster() {
 }
 
 function create_cluster() {
-  # Three hostPort mappings: 443 (HTTPS), 7050 (orderer gRPC), 7051 (peer gRPC)
+  # Four hostPort mappings: 443 (HTTPS), 7054 (CA), 7050 (orderer gRPC), 7051 (peer gRPC)
   cat <<EOF | kind create cluster --name "$KIND_CLUSTER_NAME" \
                                    --image "$KIND_CLUSTER_IMAGE" --config=-
 ---
@@ -253,6 +256,9 @@ nodes:
     extraPortMappings:
       - containerPort: 443
         hostPort: 443
+        protocol: TCP
+      - containerPort: 7054
+        hostPort: 7054
         protocol: TCP
       - containerPort: 7050
         hostPort: 7050
@@ -806,6 +812,15 @@ spec:
       allowedRoutes:
         namespaces:
           from: Same
+    - name: ca-passthrough
+      port: {{ ingress_ca_port }}
+      protocol: TLS
+      hostname: "*.{{ ingress_domain }}"
+      tls:
+        mode: Passthrough
+      allowedRoutes:
+        namespaces:
+          from: Same
     - name: orderer-passthrough
       port: {{ ingress_grpc_orderer_port }}
       protocol: TLS
@@ -985,28 +1000,28 @@ The console `HTTPRoute` task carries only `when: ingress_type == 'gateway-api'` 
 there is no `expose_console` flag because the console is always required externally
 (see PRE-ANALYSIS §2.4.3).
 
-#### 5.6.2 Template: `HTTPRoute` for CA (gated by `expose_ca`)
+#### 5.6.2 Template: `TLSRoute` for CA API and operations (gated by `expose_ca`)
 
-**New file:** `roles/certificate_authority/templates/k8s/gateway/httproute-ca.yaml.j2`
+**New file:** `roles/certificate_authority/templates/k8s/gateway/tlsroute-ca.yaml.j2`
+
+CA enrollment validates the certificate presented by the CA itself. The route must
+therefore use TLS passthrough rather than terminating and re-originating TLS at the
+Gateway.
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
-kind: HTTPRoute
+kind: TLSRoute
 metadata:
   name: "{{ ca_name | lower | replace(' ', '-') }}-api"
   namespace: "{{ namespace }}"
 spec:
   parentRefs:
     - name: fabric-gateway
-      sectionName: https
+      sectionName: ca-passthrough
   hostnames:
-    - "{{ ca_api_hostname }}"     # e.g. org1ca-api.localho.st
+    - "{{ ca_api_hostname }}"     # SNI match, e.g. org1ca-api.localho.st
   rules:
-    - matches:
-        - path:
-            type: PathPrefix
-            value: /
-      backendRefs:
+    - backendRefs:
         - name: "{{ ca_service }}"
           port: 7054
 ```
@@ -1209,12 +1224,12 @@ After the existing peer creation tasks, add (in order):
 creation role)
 
 ```yaml
-- name: Create Gateway API HTTPRoute for CA API
+- name: Create Gateway API TLSRoute for CA API
   kubernetes.core.k8s:
     state: present
     namespace: "{{ namespace }}"
     resource_definition: "{{ lookup('template',
-      'templates/k8s/gateway/httproute-ca.yaml.j2') }}"
+      'templates/k8s/gateway/tlsroute-ca.yaml.j2') }}"
   when:
     - ingress_type == 'gateway-api'
     - expose_ca | bool
@@ -1280,6 +1295,7 @@ selected unless stated otherwise.
 | `gateway_class_name` | Yes | `fabric_operator_crds` | Name of the pre-provisioned GatewayClass. |
 | `ingress_domain` | Yes | `fabric_operator_crds` and all route hostnames | DNS suffix covered by the Gateway wildcard listener, for example `example.com`. |
 | `ingress_tls_secret` | Conditional | `fabric_operator_crds` | Name of the existing same-namespace TLS Secret used by the HTTPS listener; omit only when the documented default `fabric-tls-secret` exists. |
+| `ingress_ca_port` | No | `fabric_operator_crds`, `endorsing_organization`, `ordering_organization` | Override only when the external TLS listener cannot use `7054`. |
 | `ingress_grpc_orderer_port` | No | `fabric_operator_crds`, `ordering_organization` | Override only when the external TLS listener cannot use `7050`. |
 | `ingress_grpc_peer_port` | No | `fabric_operator_crds`, `endorsing_organization` | Override only when the external TLS listener cannot use `7051`. |
 
@@ -1325,7 +1341,8 @@ selected unless stated otherwise.
    `ingress_type` and the four `expose_*` variables are the new inputs consumed by
    this role. The tutorial must combine them with the shared Gateway values when the
    same playbook also runs `fabric_operator_crds`, use `:7051` in `peer_api_url`,
-   and use `:443` for operations and gRPC-Web URLs. Before implementation, W6 must
+   use `:7054` for CA `api_url` and `operations_url`, and use `:443` for peer
+   operations and gRPC-Web URLs. Before implementation, W6 must
    confirm the operator-provided names of these URLs and the peer, gRPC-Web, and CA
    Services so the examples match the generated resources.
 
@@ -1346,7 +1363,8 @@ selected unless stated otherwise.
    `ingress_type`, `expose_orderer`, `expose_orderer_operations`, and `expose_ca`
    are the new inputs consumed by this role. The tutorial must combine them with the
    shared Gateway values when the same playbook also runs `fabric_operator_crds`,
-   use `:7050` in `orderer_api_url`, and use `:443` for operations URLs. Before
+   use `:7050` in `orderer_api_url`, use `:7054` for CA `api_url` and
+   `operations_url`, and use `:443` for orderer operations URLs. Before
    implementation, W6 must confirm the operator-provided names of these URLs and
    the orderer and CA Services so the examples match the generated resources.
 
@@ -1360,12 +1378,13 @@ those tutorials are implemented.
 
 The tutorial must explain:
 
-1. The three-listener `Gateway` model and why ports 443 / 7050 / 7051 are chosen.
+1. The four-listener `Gateway` model and why ports 443 / 7054 / 7050 / 7051 are chosen.
 2. That the `GatewayClass` and Envoy Gateway controller must be installed as a
    cluster-level prerequisite **before** running any collection playbook —
    mirroring the existing nginx prerequisite instructions.
 3. That `api_url` for peers now resolves to port 7051 and for orderers to port 7050.
-4. That `grpcwp_url`, `operations_url`, and CA `api_url` remain on port 443.
+4. That CA `api_url` and `operations_url` use TLS passthrough on port 7054, while
+   `grpcwp_url` and peer and orderer `operations_url` remain on port 443.
 5. The `kubectl get gateway -n <namespace>` command to verify the Gateway is
    programmed (replacing the `kubectl get ingress` instructions in the current docs).
 6. The `localho.st` wildcard DNS trick and the CoreDNS override — now applied
@@ -1449,8 +1468,10 @@ A migration is considered complete when all of the following pass:
    port 7050; both reach their pod TLS stack without termination at the gateway
    (verified by comparing the TLS certificate presented at the gateway address
    against the `tls_cert` stored in the console).
-9. **[GW]** Console and CA HTTPS endpoints are TLS-terminated at the gateway
-   (verified by inspecting the serving certificate CN).
+9. **[GW]** The console HTTPS endpoint is TLS-terminated at the gateway (verified
+   by inspecting the serving certificate CN), while the CA API and operations
+   endpoints on port 7054 preserve the CA's serving certificate through TLS
+   passthrough.
 10. **[GW]** A `fabric-sdk-py` channel join and peer query succeed end-to-end over
     the Gateway API path.
 11. **[BOTH]** Documentation builds without warnings (`make -C docs html`).

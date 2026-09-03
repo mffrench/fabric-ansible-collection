@@ -75,3 +75,6 @@ In @plan/move-ingress/MIGRATION-PLAN.md, you are using string as value for backe
 
 In @plan/move-ingress/MIGRATION-PLAN.md, some new definition are required by the end user when they want to deploy a Fabric network using Kubernetes Gateway API. For each role requiring exposing the underlying service to the ingress, plan dedicated tutorial tasks to add new tutorial demonstrating how we can use these roles coupled with Kubernetes API Gateway. Provide also for each roles the exaustive list of new required variables.
 
+## Fix Fabric CA exposition from the ingress
+
+The CA should remain passthrough rather than TLS-terminated. The current plan terminates TLS at the gateway for the CA, but CA enrollment validates the CA's own TLS certificate. Terminating TLS at the gateway will break enrollment unless it is configured as passthrough. Can you fix @plan/move-ingress/GATEWAY-API-IMPLEMENTATIONS.md, @plan/move-ingress/MIGRATION-PLAN.md & @plan/move-ingress/PRE-ANALYSIS.md ?

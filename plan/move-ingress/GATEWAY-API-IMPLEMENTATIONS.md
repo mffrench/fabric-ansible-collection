@@ -2,7 +2,8 @@
 
 > **Scope:** This document compares every major Kubernetes Gateway API
 > implementation against Hyperledger Fabric's specific routing requirements
-> (TLS passthrough on dedicated ports, HTTPS reverse-proxy, SNI-based routing)
+> (TLS passthrough on dedicated ports for Fabric nodes and CAs, HTTPS reverse-proxy,
+> SNI-based routing)
 > and concludes with a recommendation for CI / PoC vs production use.
 >
 > It is a companion to `PRE-ANALYSIS.md` §4 and supersedes the short list of
@@ -16,9 +17,9 @@ Any implementation must satisfy **all three** of these to be usable:
 
 | # | Requirement | Gateway API resource | Why it matters |
 |---|-------------|----------------------|----------------|
-| R1 | TLS passthrough on a dedicated port (`:7050`, `:7051`) | `TLSRoute` with `mode: Passthrough` on a `TLS` protocol listener | Fabric nodes present their own mTLS certificate; no proxy termination is acceptable |
-| R2 | SNI-based backend selection within the passthrough listener | `TLSRoute.spec.hostnames` | Multiple peers / orderers share the same passthrough port |
-| R3 | HTTPS reverse-proxy with TLS termination | `HTTPRoute` on an `HTTPS` protocol listener | Console, CA, gRPC-Web proxy |
+| R1 | TLS passthrough on dedicated ports (`:7054`, `:7050`, `:7051`) | `TLSRoute` with `mode: Passthrough` on a `TLS` protocol listener | Fabric nodes present their own mTLS certificate and CA enrollment validates the CA certificate; no proxy termination is acceptable |
+| R2 | SNI-based backend selection within the passthrough listener | `TLSRoute.spec.hostnames` | Multiple CAs, peers, or orderers share the same passthrough port |
+| R3 | HTTPS reverse-proxy with TLS termination | `HTTPRoute` on an `HTTPS` protocol listener | Console, gRPC-Web proxy, and peer/orderer operations endpoints |
 
 All three are Standard-channel (GA) resources in Gateway API v1.6. Any
 conformant implementation must support them.

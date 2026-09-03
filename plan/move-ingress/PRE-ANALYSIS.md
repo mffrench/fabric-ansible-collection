@@ -134,7 +134,7 @@ own TLS and protocol characteristics.
 | **gRPC-Web proxy** (`grpcweb` sidecar) | HTTP/1.1 + WebSocket upgrade | TLS terminated at the proxy | Standard HTTPS reverse-proxy (HTTP/2 not required) |
 | **Operations / Health** | HTTPS REST | Pod-originated TLS | HTTPS reverse-proxy or TLS passthrough |
 | **Console (Fabric Operations Console)** | HTTPS | TLS terminated at the ingress or at the pod | Standard HTTPS reverse-proxy |
-| **CA (Fabric CA)** | HTTPS REST | Pod-originated TLS | Standard HTTPS reverse-proxy or TLS passthrough |
+| **CA (Fabric CA)** | HTTPS REST | Pod-originated TLS; enrollment validates the CA certificate | **TLS passthrough** — the gateway must preserve the CA's serving certificate |
 
 ### 2.2 TLS passthrough: port routing vs SNI routing
 
@@ -283,7 +283,8 @@ polled during startup via `/healthz`.
 - Scenario A: the control machine can reach the CA via the in-cluster `Service`
   DNS name. No external gateway route is needed.
 - Scenarios B and C: the control machine is outside the cluster. An external
-  gateway route on the HTTPS listener (`:443`) is required.
+  TLS passthrough route on a dedicated CA listener (`:7054`) is required. TLS
+  termination is invalid because enrollment validates the CA's own certificate.
 
 **Conclusion: CA external gateway route is mandatory when the control machine is
 outside the cluster (Scenarios B and C); optional in Scenario A. The `expose_ca`
@@ -405,7 +406,7 @@ design and cannot be meaningfully exposed through an ingress or gateway.
 | Service | Scenario A (in-cluster) | Scenario B (out-of-cluster, single) | Scenario C (multi-cluster) | Default `expose_*` | Listener |
 |---------|------------------------|------------------------------------|-----------------------------|-------------------|---------|
 | Console `api_endpoint` | ✅ mandatory (browser) | ✅ mandatory | ✅ mandatory | always on | HTTPS `:443` |
-| CA `api_url` | ❌ optional (ClusterIP) | ✅ mandatory | ✅ mandatory | `expose_ca: true` | HTTPS `:443` |
+| CA `api_url` | ❌ optional (ClusterIP) | ✅ mandatory | ✅ mandatory | `expose_ca: true` | TLS passthrough `:7054` |
 | Peer `api_url` (gRPC) | ❌ optional | ✅ mandatory | ✅ mandatory | `expose_peer: true` | TLS passthrough `:7051` |
 | Orderer `api_url` (gRPC) | ❌ optional | ✅ mandatory | ✅ mandatory | `expose_orderer: true` | TLS passthrough `:7050` |
 | Peer `operations_url` | ❌ optional | ⚠️ conditional | ⚠️ conditional | `expose_peer_operations: false` | HTTPS `:443` |
@@ -465,7 +466,7 @@ which is forwarded through the KIND `hostPort: 443` mapping into the nginx ingre
 controller pod, and from there through the TLS-passthrough route to the target pod.
 
 **Every direct connection from Ansible to a Fabric node (peer gRPC, orderer gRPC,
-CA HTTPS, operations `/healthz`) therefore traverses the external ingress — the
+CA TLS, operations `/healthz`) therefore traverses the external ingress — the
 cluster's nginx controller — in the current CI.** There is no in-cluster shortcut.
 
 #### 2.5.3 Consequence for the `expose_*` defaults and the Gateway API CI path
@@ -494,7 +495,8 @@ Specifically:
 
 The CI bootstrap script (`kind_with_envoy_gateway.sh`, W2) must therefore provision
 the KIND cluster with **four** exposed ports:
-- `:443` — HTTPS listener (console, CA, operations, gRPC-Web)
+- `:443` — HTTPS listener (console, operations, gRPC-Web)
+- `:7054` — CA TLS passthrough
 - `:7050` — orderer gRPC passthrough
 - `:7051` — peer gRPC passthrough
 
@@ -597,8 +599,8 @@ of any particular controller.
 
 | Requirement | Gateway API support | Notes |
 |-------------|--------------------|----|
-| TLS passthrough (gRPC mTLS) | ✅ `TLSRoute` with `mode: Passthrough` on a dedicated listener | Requires a conformant implementation that supports `TLSRoute`; not all do |
-| Port-based protocol segregation | ✅ Multiple listeners on the same `Gateway` | e.g. `:443 HTTPS` + `:7051 TLS Passthrough` on one `Gateway` object |
+| TLS passthrough (peer/orderer mTLS and CA TLS) | ✅ `TLSRoute` with `mode: Passthrough` on a dedicated listener | Required for peer/orderer mTLS and CA certificate validation; requires a conformant implementation that supports `TLSRoute` |
+| Port-based protocol segregation | ✅ Multiple listeners on the same `Gateway` | `:443 HTTPS` plus dedicated `:7054`/`:7050`/`:7051` TLS Passthrough listeners on one `Gateway` object |
 | HTTP/2 gRPC-Web proxy | ✅ `HTTPRoute` with an HTTP/2-capable implementation | Straightforward |
 | HTTPS console | ✅ `HTTPRoute` | Straightforward |
 | SNI-based hostname routing within a passthrough listener | ✅ Native in `TLSRoute` via `spec.hostnames` | Core feature of the API |
@@ -615,23 +617,34 @@ metadata:
 spec:
   gatewayClassName: eg   # e.g. Envoy Gateway
   listeners:
-    - name: https          # Console, CA, gRPC-Web — TLS terminated here
+    - name: https          # Console, gRPC-Web — TLS terminated here
       port: 443
       protocol: HTTPS
       tls:
         mode: Terminate
         certificateRefs:
           - name: fabric-tls-secret
-    - name: grpc-passthrough   # Peer/orderer gRPC API — TLS NOT touched
+    - name: ca-passthrough     # CA API and operations — TLS NOT touched
+      port: 7054
+      protocol: TLS
+      tls:
+        mode: Passthrough
+    - name: orderer-passthrough # Orderer gRPC API — TLS NOT touched
+      port: 7050
+      protocol: TLS
+      tls:
+        mode: Passthrough
+    - name: peer-passthrough    # Peer gRPC API — TLS NOT touched
       port: 7051
       protocol: TLS
       tls:
         mode: Passthrough
 ```
 
-`HTTPRoute` resources bind to the `https` listener; `TLSRoute` resources bind to
-the `grpc-passthrough` listener and use `spec.hostnames` to select individual node
-backends. This is structurally identical to the Istio approach described in §5.
+`HTTPRoute` resources bind to the `https` listener. `TLSRoute` resources bind to
+the `ca-passthrough`, `orderer-passthrough`, or `peer-passthrough` listener and use
+`spec.hostnames` to select individual backends. This is structurally identical to
+the Istio approach described in §5.
 
 With `TLSRoute` Standard in v1.6, the implementation landscape has broadened.
 See [`GATEWAY-API-IMPLEMENTATIONS.md`](./GATEWAY-API-IMPLEMENTATIONS.md) for a
@@ -665,14 +678,14 @@ A Gateway API migration would produce:
    Production cluster administrators install their preferred conformant
    implementation instead.
 2. **A `Gateway` manifest** (namespace-scoped, domain-parameterised) applied by
-   the `fabric_operator_crds` role with two listeners (`:443 HTTPS` and
-   `:7050`/`:7051 TLS Passthrough`). Unlike the controller itself, the `Gateway`
+   the `fabric_operator_crds` role with four listeners (`:443 HTTPS` and
+   `:7054`/`:7050`/`:7051 TLS Passthrough). Unlike the controller itself, the `Gateway`
    resource is a per-deployment configuration that belongs inside the Ansible role.
-3. **`TLSRoute` resources** for the raw gRPC `api_url` endpoints — generated by a
-   post-creation Ansible task (until the `fabric-operator` upstream adds native
-   Gateway API support).
-4. **`HTTPRoute` resources** for the console, gRPC-Web proxy, CA, and Operations
-   endpoints.
+3. **`TLSRoute` resources** for the CA, peer, and orderer `api_url` endpoints —
+   generated by a post-creation Ansible task (until the `fabric-operator` upstream
+   adds native Gateway API support).
+4. **`HTTPRoute` resources** for the console, gRPC-Web proxy, and peer and orderer
+   Operations endpoints.
 5. **Updated CI CoreDNS override** in the bootstrap script, pointing at the Envoy
    Gateway service ClusterIP instead of the nginx service ClusterIP.
 6. **Updated RBAC** to grant the operator `gateway.networking.k8s.io` permissions.
@@ -726,8 +739,8 @@ routing, SNI-based passthrough, and HTTP/2 natively.
 
 | Requirement | Istio support | Notes |
 |-------------|--------------|-------|
-| TLS passthrough (gRPC mTLS) | ✅ `Gateway` + `VirtualService` with `tls.mode: PASSTHROUGH` | First-class; battle-tested in production Fabric deployments |
-| Port-based protocol segregation | ✅ Dedicated ports on the Istio `Gateway` resource | Same model as Gateway API §4.2 — `:443 HTTPS` + `:7051 TLS` |
+| TLS passthrough (gRPC mTLS and CA TLS) | ✅ `Gateway` + `VirtualService` with `tls.mode: PASSTHROUGH` | First-class; CA enrollment also requires passthrough |
+| Port-based protocol segregation | ✅ Dedicated ports on the Istio `Gateway` resource | Same model as Gateway API §4.2 — `:443 HTTPS` + `:7054`/`:7050`/`:7051 TLS` |
 | HTTP/2 gRPC-Web proxy | ✅ `VirtualService` with `match.uri.prefix` | Istio natively understands gRPC traffic |
 | HTTPS console | ✅ `VirtualService` with TLS termination at the gateway | |
 | SNI-based hostname routing within a passthrough listener | ✅ Built-in; `tls.match.sniHosts` | |
@@ -741,10 +754,10 @@ routing, SNI-based passthrough, and HTTP/2 natively.
    significant new dependency (~300 MB of control-plane containers).
 2. **Namespace labelling** `istio-injection=enabled` on the HLF namespace.
 3. **`Gateway` resource** (Istio kind, not Gateway API kind) with dedicated ports:
-   - port 443 / `HTTPS` for console and CA (TLS termination)
-   - port 7051 / `TLS PASSTHROUGH` for gRPC API
+   - port 443 / `HTTPS` for the console, gRPC-Web, and Operations endpoints (TLS termination)
+   - ports 7054 / 7050 / 7051 / `TLS PASSTHROUGH` for CA, orderer gRPC, and peer gRPC endpoints respectively
 4. **`VirtualService` resources** per component:
-   - `sniHosts` match for gRPC API passthrough on the `:7051` listener
+   - `sniHosts` match for CA, orderer, and peer passthrough on their dedicated listeners
    - `route` with rewrite/header manipulation for console and gRPC-Web on `:443`
 5. **Sidecar injection** in the HLF operator namespace — Envoy sidecars are injected
    into every pod, which can interfere with Fabric's own TLS if `STRICT` mTLS mode
@@ -895,16 +908,19 @@ rewritten (or made conditional on `ingress_type`).
 
 This is an **architectural decision** that ripples through every URL in the collection.
 
-The recommended model (§2.2) exposes two listeners on one `Gateway`:
+The recommended model (§2.2) exposes four listeners on one `Gateway`:
 
 | Listener | Port | Protocol | Serves |
 |----------|------|----------|--------|
-| `https` | 443 | `HTTPS` (TLS terminate) | Console, CA, gRPC-Web proxy, Operations |
-| `grpc-passthrough` | 7051 | `TLS` (Passthrough) | All peer and orderer gRPC API endpoints |
+| `https` | 443 | `HTTPS` (TLS terminate) | Console, gRPC-Web proxy, peer and orderer Operations |
+| `ca-passthrough` | 7054 | `TLS` (Passthrough) | All CA API and operations endpoints |
+| `orderer-passthrough` | 7050 | `TLS` (Passthrough) | All orderer gRPC API endpoints |
+| `peer-passthrough` | 7051 | `TLS` (Passthrough) | All peer gRPC API endpoints |
 
-Under this model, all `api_url` values change from their current port (`:443` or
-`:32000` in samples) to `:7051`. The `grpcwp_url` and `operations_url` values
-remain on `:443`. This affects:
+Under this model, peer and orderer `api_url` values change from their current port
+(`:443` or `:32000` in samples) to `:7051` and `:7050` respectively; CA `api_url`
+and `operations_url` use `:7054`. The `grpcwp_url` and peer and orderer
+`operations_url` values remain on `:443`. This affects:
 
 - Tutorial vars files (`ordering-org-vars.yml`, `org1-vars.yml`, `org2-vars.yml`)
 - Integration test fixtures (`one_node_ordering_service.json.j2`)
@@ -912,9 +928,9 @@ remain on `:443`. This affects:
 - The `channel_consenters.py` and `channel_config.py` modules which parse the port
   directly from `api_url` (see [`channel_consenters.py`](../../plugins/modules/channel_consenters.py#L168))
 
-An alternative is to keep all endpoints on `:443` and rely purely on SNI within a
-single passthrough listener — preserving the current URL format at the cost of
-losing the clean protocol separation. The plan must make this choice explicit.
+CA endpoints cannot share the TLS-terminating `https` listener on `:443`: doing so
+would replace the certificate that CA enrollment validates. They therefore require
+the dedicated `:7054` passthrough listener.
 
 ### 8.7 Ansible variable abstraction (`ingress_type`)
 
