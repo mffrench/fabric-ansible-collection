@@ -71,3 +71,7 @@ Can you ensure integration tests are handled so that both NGINX ingress and Fabr
 
 In @plan/move-ingress/MIGRATION-PLAN.md, you are using string as value for backendRefs ports. However, the @https://gateway-api.sigs.k8s.io/reference/api-spec/1.6/spec/#backendref documentation state it should be an integer. Can you review the Kubernetes Gateway API usage in the plan, list any discrepency like that and then finaly fix the plan for each discrepency I will double check ? We will last final version of Kubernetes Gateway API (1.6) documented here: @https://gateway-api.sigs.k8s.io/reference/api-spec/1.6/spec
 
+## Add tutorials task in the plan so that any new variables should be documented through new tutorials
+
+In @plan/move-ingress/MIGRATION-PLAN.md, some new definition are required by the end user when they want to deploy a Fabric network using Kubernetes Gateway API. For each role requiring exposing the underlying service to the ingress, plan dedicated tutorial tasks to add new tutorial demonstrating how we can use these roles coupled with Kubernetes API Gateway. Provide also for each roles the exaustive list of new required variables.
+

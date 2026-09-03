@@ -1237,7 +1237,13 @@ Until that PR is merged, W6's post-task overlay is the supported path.
 
 ---
 
-### 5.7 W7 — Documentation
+### 5.7 W7 — Documentation and role tutorials
+
+W7 must provide a Gateway API tutorial for every collection role that creates a
+Gateway API resource or creates a component whose Service can be exposed by one.
+The tutorials must state which variables the user sets in the playbook or its
+`vars_files`; they must not imply that the collection installs a Gateway API
+controller or GatewayClass.
 
 #### Files to update
 
@@ -1245,16 +1251,110 @@ Until that PR is merged, W6's post-task overlay is the supported path.
 |------|--------|
 | `docs/source/tutorials/oss-installing.rst` | Add Gateway API installation path; replace IKS/nginx SSL passthrough note with Gateway API equivalent |
 | `docs/source/tutorials/hlfsupport-installing.rst` | Same |
-| `docs/source/roles/fabric-operator-crds.rst` | Add `ingress_type` parameter documentation; update "Ingress Controllers" section |
-| `docs/source/roles/fabric-console.rst` | Same |
-| `docs/source/roles/hlfsupport_console.rst` | Same |
+| `docs/source/roles/fabric-operator-crds.rst` | Document the Gateway resource and its Gateway API variables |
+| `docs/source/roles/fabric-console.rst` | Link to the console Gateway API tutorial and document console hostname/TLS inputs |
+| `docs/source/roles/hlfsupport_console.rst` | Link to the console Gateway API tutorial and document console hostname/TLS inputs |
+| `docs/source/roles/endorsing-organization.rst` | Link to the peer and CA Gateway API tutorial and document the peer exposure switches |
+| `docs/source/roles/ordering-organization.rst` | Link to the orderer and CA Gateway API tutorial and document the orderer exposure switches |
+| `docs/source/index.rst` | Add the four Gateway API tutorial pages to the Tutorials toctree |
 
 #### New pages to create
 
 | File | Content |
 |------|---------|
-| `docs/source/tutorials/gateway-api-install.rst` | Step-by-step: install KIND, Envoy Gateway, bootstrap a Fabric network with `ingress_type: gateway-api` |
+| `docs/source/tutorials/gateway-api-install.rst` | Cluster prerequisite and shared Gateway setup, followed by links to each role tutorial |
+| `docs/source/tutorials/gateway-api-console.rst` | Use `fabric_console` or `hlfsupport_console` with the HTTPS console route |
+| `docs/source/tutorials/gateway-api-endorsing-organization.rst` | Use `endorsing_organization` with peer gRPC, operations, gRPC-Web, and CA routes |
+| `docs/source/tutorials/gateway-api-ordering-organization.rst` | Use `ordering_organization` with orderer gRPC, operations, and CA routes |
 | `docs/source/tutorials/migrate-nginx-to-gateway.rst` | Upgrade guide for existing nginx-based deployments |
+
+#### Shared Gateway API variables
+
+Each role tutorial must start by referring to `gateway-api-install.rst` and list
+these shared variables. A value is required when `ingress_type: gateway-api` is
+selected unless stated otherwise.
+
+| Variable | Required | Used by | Tutorial requirement |
+|----------|----------|---------|----------------------|
+| `ingress_type` | Yes | `fabric_operator_crds`, `fabric_console`, `hlfsupport_console`, `endorsing_organization`, `ordering_organization` | Set to `gateway-api`. |
+| `gateway_class_name` | Yes | `fabric_operator_crds` | Name of the pre-provisioned GatewayClass. |
+| `ingress_domain` | Yes | `fabric_operator_crds` and all route hostnames | DNS suffix covered by the Gateway wildcard listener, for example `example.com`. |
+| `ingress_tls_secret` | Conditional | `fabric_operator_crds` | Name of the existing same-namespace TLS Secret used by the HTTPS listener; omit only when the documented default `fabric-tls-secret` exists. |
+| `ingress_grpc_orderer_port` | No | `fabric_operator_crds`, `ordering_organization` | Override only when the external TLS listener cannot use `7050`. |
+| `ingress_grpc_peer_port` | No | `fabric_operator_crds`, `endorsing_organization` | Override only when the external TLS listener cannot use `7051`. |
+
+#### Role tutorial tasks and exhaustive new route variables
+
+1. **`fabric_operator_crds` — `gateway-api-install.rst`**
+
+   Document installing the conformant Gateway API controller and GatewayClass as a
+   cluster prerequisite, creating the TLS Secret in the target namespace, and then
+   running `fabric_operator_crds`. Show the shared variables above and verify
+   `Gateway/fabric-gateway` reports `Programmed=True`. This is the only role that
+   creates the shared Gateway; it exposes no Fabric component Service itself.
+
+2. **`fabric_console` and `hlfsupport_console` — `gateway-api-console.rst`**
+
+   Provide one tutorial with separate examples for both console roles. It must
+   establish the exact `IBPConsole` Service name and generated hostname from the
+   corresponding operator before documenting the HTTPS `HTTPRoute`, then verify that
+   route. The only new Gateway API input consumed by each console role is
+   `ingress_type: gateway-api`; `console_domain` and `console_tls_secret` remain the
+   role's existing required or optional console inputs. The tutorial must also point
+   to the `fabric_operator_crds` deployment that supplies the shared Gateway and
+   document its shared variables; console playbooks must not redundantly set
+   `gateway_class_name`, `ingress_domain`, `ingress_tls_secret`, or either gRPC port
+   unless they run that role too.
+
+3. **`endorsing_organization` — `gateway-api-endorsing-organization.rst`**
+
+   Demonstrate peer creation with a TLSRoute on the peer listener and show optional
+   HTTPRoutes for operations and gRPC-Web. The exhaustive new route variables are:
+
+   | Variable | Required | Route created |
+   |----------|----------|---------------|
+   | `expose_peer` | Yes | Peer gRPC TLSRoute when `true`; set `false` for in-cluster-only peer access. |
+   | `expose_peer_operations` | Yes | Peer operations HTTPRoute when `true`; default `false`. |
+   | `expose_grpcweb` | Yes | Peer gRPC-Web HTTPRoute when `true`; default `false`. |
+   | `expose_ca` | Yes | Organization CA route when `true`; set `false` when enrollment remains in-cluster. |
+   | `peer_api_url` | Yes when `expose_peer: true` | Supplies the peer TLSRoute hostname. |
+   | `peer_operations_url` | Yes when `expose_peer_operations: true` | Supplies the operations HTTPRoute hostname. |
+   | `peer_grpcwp_url` | Yes when `expose_grpcweb: true` | Supplies the gRPC-Web HTTPRoute hostname. |
+   | `ca_api_url` | Yes when `expose_ca: true` | Supplies the CA route hostname. |
+
+   `ingress_type` and the four `expose_*` variables are the new inputs consumed by
+   this role. The tutorial must combine them with the shared Gateway values when the
+   same playbook also runs `fabric_operator_crds`, use `:7051` in `peer_api_url`,
+   and use `:443` for operations and gRPC-Web URLs. Before implementation, W6 must
+   confirm the operator-provided names of these URLs and the peer, gRPC-Web, and CA
+   Services so the examples match the generated resources.
+
+4. **`ordering_organization` — `gateway-api-ordering-organization.rst`**
+
+   Demonstrate orderer creation with a TLSRoute on the orderer listener and an
+   optional operations HTTPRoute. The exhaustive new route variables are:
+
+   | Variable | Required | Route created |
+   |----------|----------|---------------|
+   | `expose_orderer` | Yes | Orderer gRPC TLSRoute when `true`; set `false` for in-cluster-only orderer access. |
+   | `expose_orderer_operations` | Yes | Orderer operations HTTPRoute when `true`; default `false`. |
+   | `expose_ca` | Yes | Organization CA route when `true`; set `false` when enrollment remains in-cluster. |
+   | `orderer_api_url` | Yes when `expose_orderer: true` | Supplies the orderer TLSRoute hostname. |
+   | `orderer_operations_url` | Yes when `expose_orderer_operations: true` | Supplies the operations HTTPRoute hostname. |
+   | `ca_api_url` | Yes when `expose_ca: true` | Supplies the CA route hostname. |
+
+   `ingress_type`, `expose_orderer`, `expose_orderer_operations`, and `expose_ca`
+   are the new inputs consumed by this role. The tutorial must combine them with the
+   shared Gateway values when the same playbook also runs `fabric_operator_crds`,
+   use `:7050` in `orderer_api_url`, and use `:443` for operations URLs. Before
+   implementation, W6 must confirm the operator-provided names of these URLs and
+   the orderer and CA Services so the examples match the generated resources.
+
+`certificate_authority` is an Ansible module used from the endorsing and ordering
+organization roles, not a standalone role in this collection. Its Gateway API
+exposure is therefore documented in both organization tutorials through
+`expose_ca` and `ca_api_url`; W6 must identify the concrete CA creation task before
+those tutorials are implemented.
 
 #### Key content for `gateway-api-install.rst`
 
