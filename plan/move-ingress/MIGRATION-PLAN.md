@@ -152,11 +152,8 @@ boolean flags derived from the exposition analysis in PRE-ANALYSIS §2.4:
 ingress_type: nginx
 
 # Gateway API path only: the GatewayClass name installed as a cluster prerequisite.
-# The default targets Envoy Gateway (CI/PoC). Override to use any conformant
-# implementation without changing any other template:
-#   istio            → Istio Gateway API mode
-#   nginx            → NGINX Gateway Fabric
-#   cilium           → Cilium Gateway API
+# The default targets Envoy Gateway (CI/PoC). Set this to the name of a
+# GatewayClass provisioned by the selected conformant implementation.
 gateway_class_name: fabric-envoy-gateway
 
 # Gateway API path only: external ports for TLS passthrough listeners.
@@ -221,7 +218,7 @@ CONTAINER_REGISTRY_NAME=${CONTAINER_REGISTRY_NAME:-kind-registry}
 CONTAINER_REGISTRY_ADDRESS=${CONTAINER_REGISTRY_ADDRESS:-127.0.0.1}
 CONTAINER_REGISTRY_PORT=${CONTAINER_REGISTRY_PORT:-5000}
 ENVOY_GATEWAY_VERSION=${ENVOY_GATEWAY_VERSION:-v1.3.0}
-GATEWAY_API_VERSION=${GATEWAY_API_VERSION:-v1.5.0}
+GATEWAY_API_VERSION=${GATEWAY_API_VERSION:-v1.6.0}
 GATEWAY_CLASS_NAME=${GATEWAY_CLASS_NAME:-fabric-envoy-gateway}
 
 function kind_with_envoy_gateway() {
@@ -278,7 +275,7 @@ EOF
 }
 
 function install_gateway_api_crds() {
-  # TLSRoute is GA in Gateway API v1.5 — standard channel is sufficient.
+  # TLSRoute is Standard in Gateway API v1.6 — standard channel is sufficient.
   kubectl apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml"
   kubectl wait --for condition=established \
     crd/gateways.gateway.networking.k8s.io \
@@ -299,8 +296,8 @@ function apply_gatewayclass() {
   # Only the GatewayClass is applied here. The Gateway resource itself is
   # created by the Ansible playbook, since it carries namespace and domain
   # variables that are not known at bootstrap time.
-  # GATEWAY_CLASS_NAME is overridable so the same script can test against
-  # any conformant implementation (e.g. GATEWAY_CLASS_NAME=nginx for NGF).
+  # GATEWAY_CLASS_NAME overrides the name of the Envoy Gateway GatewayClass.
+  # Other implementations must provision their own GatewayClass.
   kubectl apply -f - <<EOF
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
@@ -796,7 +793,7 @@ metadata:
   name: fabric-gateway
   namespace: "{{ namespace }}"
 spec:
-  gatewayClassName: fabric-envoy-gateway
+  gatewayClassName: "{{ gateway_class_name }}"
   listeners:
     - name: https
       port: 443
@@ -810,7 +807,7 @@ spec:
         namespaces:
           from: Same
     - name: orderer-passthrough
-      port: "{{ ingress_grpc_orderer_port }}"
+      port: {{ ingress_grpc_orderer_port }}
       protocol: TLS
       hostname: "*.{{ ingress_domain }}"
       tls:
@@ -819,7 +816,7 @@ spec:
         namespaces:
           from: Same
     - name: peer-passthrough
-      port: "{{ ingress_grpc_peer_port }}"
+      port: {{ ingress_grpc_peer_port }}
       protocol: TLS
       hostname: "*.{{ ingress_domain }}"
       tls:
@@ -981,7 +978,7 @@ spec:
             value: /
       backendRefs:
         - name: "{{ component_service }}"
-          port: "{{ component_service_port }}"
+          port: {{ component_service_port }}
 ```
 
 The console `HTTPRoute` task carries only `when: ingress_type == 'gateway-api'` —
@@ -1040,7 +1037,7 @@ spec:
             value: /
       backendRefs:
         - name: "{{ component_service }}"
-          port: "{{ component_operations_port }}"
+          port: {{ component_operations_port }}
 ```
 
 Post-task conditions:
@@ -1310,7 +1307,7 @@ backwards compatibility) so callers in `peer_metadata.py` and
 
 | Milestone | Action |
 |-----------|--------|
-| **v2.1 (this plan)** | `ingress_type: nginx` is the default. `ingress_type: gateway-api` is available as a preview. Deprecation notice added to nginx path documentation. Note: `TLSRoute` is GA in Gateway API v1.5; there is no API stability concern with the Gateway API path itself. |
+| **v2.1 (this plan)** | `ingress_type: nginx` is the default. `ingress_type: gateway-api` is available as a preview. Deprecation notice added to nginx path documentation. Note: `TLSRoute` is Standard in Gateway API v1.6; there is no API stability concern with the Gateway API path itself. |
 | **v2.2** | `ingress_type: gateway-api` promoted to stable default. Nginx path still supported but produces an `ansible.builtin.warn`. |
 | **v2.3** | Nginx path removed. `ingress_type` default changed to `gateway-api`. |
 

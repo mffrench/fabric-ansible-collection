@@ -17,10 +17,10 @@ Any implementation must satisfy **all three** of these to be usable:
 | # | Requirement | Gateway API resource | Why it matters |
 |---|-------------|----------------------|----------------|
 | R1 | TLS passthrough on a dedicated port (`:7050`, `:7051`) | `TLSRoute` with `mode: Passthrough` on a `TLS` protocol listener | Fabric nodes present their own mTLS certificate; no proxy termination is acceptable |
-| R2 | SNI-based backend selection within the passthrough listener | `TLSRoute.spec.hostnames` (sniHosts) | Multiple peers / orderers share the same passthrough port |
+| R2 | SNI-based backend selection within the passthrough listener | `TLSRoute.spec.hostnames` | Multiple peers / orderers share the same passthrough port |
 | R3 | HTTPS reverse-proxy with TLS termination | `HTTPRoute` on an `HTTPS` protocol listener | Console, CA, gRPC-Web proxy |
 
-All three are Standard-channel (GA) resources as of Gateway API v1.5. Any
+All three are Standard-channel (GA) resources in Gateway API v1.6. Any
 conformant implementation must support them.
 
 ---
@@ -184,7 +184,7 @@ cloud provider's load balancer (which only handles external routing to the clust
 
 The Gateway API project maintains official conformance test results at
 <https://gateway-api.sigs.k8s.io/implementations/>. The table below summarises
-the relevant scores against Gateway API v1.5:
+the relevant scores:
 
 | Implementation | Core | Extended | `TLSRoute` | `TLSRoute` passthrough | Suitable for Fabric |
 |---|---|---|---|---|---|

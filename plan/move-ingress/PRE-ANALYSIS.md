@@ -581,13 +581,12 @@ either be contributed there or maintained locally in the CI script.
 
 The [Kubernetes Gateway API](https://gateway-api.sigs.k8s.io/) (`gateway.networking.k8s.io`)
 is the SIG-Network successor to `networking.k8s.io/Ingress`. It reached GA with
-v1.0 (December 2023); the current release is **v1.5 (April 2026)**. It separates
+v1.0 (December 2023); the current release is **v1.6**. It separates
 concerns across three resource levels: `GatewayClass` (infrastructure), `Gateway`
 (instance), `HTTPRoute` / `TLSRoute` / `TCPRoute` (application traffic).
 
-As of v1.5, `TLSRoute` has been **promoted to the Standard channel (GA)** — it is
-no longer an experimental or beta resource. See the [Gateway API v1.5 release
-blog](https://kubernetes.io/blog/2026/04/21/gateway-api-v1-5/).
+`TLSRoute` is a **Standard-channel (GA)** resource in v1.6; it is no longer an
+experimental or beta resource.
 
 A `Gateway` resource carries **multiple independent listeners**, each with its own
 port, protocol mode, and TLS configuration. This makes port-based protocol
@@ -602,7 +601,7 @@ of any particular controller.
 | Port-based protocol segregation | ✅ Multiple listeners on the same `Gateway` | e.g. `:443 HTTPS` + `:7051 TLS Passthrough` on one `Gateway` object |
 | HTTP/2 gRPC-Web proxy | ✅ `HTTPRoute` with an HTTP/2-capable implementation | Straightforward |
 | HTTPS console | ✅ `HTTPRoute` | Straightforward |
-| SNI-based hostname routing within a passthrough listener | ✅ Native in `TLSRoute` via `sniHosts` | Core feature of the API |
+| SNI-based hostname routing within a passthrough listener | ✅ Native in `TLSRoute` via `spec.hostnames` | Core feature of the API |
 | Multi-org multi-namespace isolation | ✅ `ReferenceGrant` | Allows cross-namespace routing |
 | Wildcard hostname matching | ✅ (GA in v1.1) | Works for `*.localho.st`-style development domains |
 
@@ -631,10 +630,10 @@ spec:
 ```
 
 `HTTPRoute` resources bind to the `https` listener; `TLSRoute` resources bind to
-the `grpc-passthrough` listener and use `sniHosts` to select individual node
+the `grpc-passthrough` listener and use `spec.hostnames` to select individual node
 backends. This is structurally identical to the Istio approach described in §5.
 
-With `TLSRoute` now GA in v1.5, the implementation landscape has broadened.
+With `TLSRoute` Standard in v1.6, the implementation landscape has broadened.
 See [`GATEWAY-API-IMPLEMENTATIONS.md`](./GATEWAY-API-IMPLEMENTATIONS.md) for a
 full comparison. A summary of implementations with confirmed `TLSRoute` passthrough
 support:
@@ -706,7 +705,7 @@ strategies exist:
 
 ### 4.6 Cons
 
-* `TLSRoute` is GA in v1.5 but implementation adoption in cloud-managed controllers
+* `TLSRoute` is Standard in v1.6 but implementation adoption in cloud-managed controllers
   is still incomplete; self-managed controllers (Envoy Gateway, Contour, NGF) are
   the reliable choice today.
 * Requires operator-side changes to replace `Ingress` with `HTTPRoute` / `TLSRoute`.
@@ -786,14 +785,14 @@ ports) causes connection failures that are difficult to diagnose. This is the
 
 | Criterion | Gateway API (Envoy Gateway / NGF) | Istio |
 |-----------|----------------------------------|-------|
-| **TLS passthrough** | ✅ `TLSRoute` (GA in v1.5) | ✅ `Gateway tls.PASSTHROUGH` (stable) |
+| **TLS passthrough** | ✅ `TLSRoute` (Standard in v1.6) | ✅ `Gateway tls.PASSTHROUGH` (stable) |
 | **Port-based protocol segregation** | ✅ Multiple listeners on one `Gateway` | ✅ Dedicated ports on Istio `Gateway` |
 | **Protocol awareness** | Limited (port / SNI only at gateway) | High (L7 gRPC + L4 TLS awareness) |
 | **Operator-side changes needed** | Yes — operator must emit `HTTPRoute`/`TLSRoute` | Yes — operator must emit `VirtualService`/`DestinationRule` |
 | **Kubernetes-native API** | ✅ | ❌ (proprietary CRDs, CNCF-standard) |
 | **Runtime weight** | Low (gateway pods only, no sidecars) | High (control-plane + sidecar per pod) |
 | **Production Fabric deployments** | Limited examples today | Several well-documented |
-| **SNI within passthrough listener** | ✅ `TLSRoute sniHosts` | ✅ `VirtualService tls.match.sniHosts` |
+| **SNI within passthrough listener** | ✅ `TLSRoute spec.hostnames` | ✅ `VirtualService tls.match.sniHosts` |
 | **mTLS complexity** | None (no mesh mTLS) | ⚠ Must be tuned to avoid conflict with Fabric mTLS |
 | **Long-term trajectory** | Standard, operator will adopt eventually | Istio now implements Gateway API; convergence expected |
 | **CI/CD bootstrap simplicity** | Moderate | Complex |
@@ -810,7 +809,7 @@ runtime weight, mTLS conflict risk, and API standardisation.
 reference implementation for CI and PoC.**
 
 Rationale:
-1. Port-based protocol segregation and `TLSRoute passthrough` (GA in v1.5) cover
+1. Port-based protocol segregation and `TLSRoute passthrough` (Standard in v1.6) cover
    all Fabric routing requirements without introducing a mesh control-plane.
 2. The collection uses **only standard Gateway API resources**; the
    implementation-specific element is the `gateway_class_name` variable only.
@@ -852,9 +851,9 @@ automatically. **The plan must either:**
 
 ### 8.2 Gateway API version pin and implementation selection
 
-`TLSRoute` was promoted to the Standard channel (GA) in Gateway API **v1.5**
-(April 2026). The CI bootstrap script must therefore target **Gateway API v1.5 or
-later** using the **standard install manifest** (not the experimental channel).
+`TLSRoute` is a Standard-channel (GA) resource in Gateway API **v1.6**. The CI
+bootstrap script must therefore target **Gateway API v1.6** using the **standard
+install manifest** (not the experimental channel).
 The current script [`kind_with_nginx.sh`](../../.github/scripts/kind_with_nginx.sh)
 pins `controller-v1.1.2` of ingress-nginx via a kustomize ref; the new
 `kind_with_envoy_gateway.sh` must pin a compatible Envoy Gateway release tag
@@ -948,7 +947,7 @@ The GitHub Actions workflow relies on
 the cluster prerequisite (ingress-nginx + CoreDNS) before any Ansible playbook
 runs. A new parallel script `kind_with_envoy_gateway.sh` must:
 1. Create a KIND cluster with host-port mappings for `:443`, `:7050`, and `:7051`.
-2. Install the Gateway API CRDs v1.5+ using the **standard channel** (`standard-install.yaml`); `TLSRoute` is GA and no longer requires the experimental channel.
+2. Install the Gateway API v1.6 CRDs using the **standard channel** (`standard-install.yaml`); `TLSRoute` is Standard and no longer requires the experimental channel.
 3. Install Envoy Gateway v1.3+ (or chosen implementation) as the `GatewayClass` controller.
 4. Apply the `GatewayClass` resource and wait for it to be `Accepted`.
 5. **Not** apply the `Gateway` resource or the CoreDNS override — these depend on
