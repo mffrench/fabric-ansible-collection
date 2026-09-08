@@ -78,3 +78,9 @@ In @plan/move-ingress/MIGRATION-PLAN.md, some new definition are required by the
 ## Fix Fabric CA exposition from the ingress
 
 The CA should remain passthrough rather than TLS-terminated. The current plan terminates TLS at the gateway for the CA, but CA enrollment validates the CA's own TLS certificate. Terminating TLS at the gateway will break enrollment unless it is configured as passthrough. Can you fix @plan/move-ingress/GATEWAY-API-IMPLEMENTATIONS.md, @plan/move-ingress/MIGRATION-PLAN.md & @plan/move-ingress/PRE-ANALYSIS.md ?
+
+## Ansible extra-vars management
+
+In  @plan/move-ingress/MIGRATION-PLAN.md, ANSIBLE_EXTRA_VARS is referenced as a way to setup ansible extra variables. However there is no reference in ansible documentation (@https://docs.ansible.com/projects/ansible/latest/) about that ANSIBLE_EXTRA_VARS user can export to replace the ansible command inline `--extra-vars` parameter. Base on the ansible documentation, can you correct if necessary ? If not necessary, can you tell the documentation reference showing its possible to setup ansible command extra vars with `ANSIBLE_EXTRA_VARS` ?
+
+Use one file to setup all the extra vars (ingress_type and expose_*) and use ansible --extra-vars ability to read file like documented in @https://docs.ansible.com/projects/ansible/latest/cli/ansible.html.

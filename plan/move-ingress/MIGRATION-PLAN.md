@@ -437,9 +437,10 @@ The current `run-tests.sh` has three bugs that make it unusable for either path:
 The correct mechanism — used by `run-tutorial-tests.sh` — is:
 - Patch the tutorial `vars` files in place with `yq` using env vars set by the
   workflow step.
-- Export `ANSIBLE_EXTRA_VARS` so that `ingress_type` and `expose_*` flags are
-  forwarded to every `ansible-playbook` invocation without modifying any playbook
-  file.
+- Write `ingress_type` and `expose_*` into `common-vars.yml` with `yq` (the same
+  pattern used for connection vars), because every tutorial playbook declares
+  `common-vars.yml` in its `vars_files:` list.  No custom env var or wrapper is
+  needed; Ansible's standard variable loading picks them up automatically.
 
 #### 5.3.2 CoreDNS timing constraint (Gateway API path)
 
@@ -535,16 +536,19 @@ for VARS_FILE in ordering-org-vars.yml org1-vars.yml org2-vars.yml; do
     yq -yi ".wait_timeout=1800"                  "${VARS_FILE}"
 done
 
-# --- 3. Forward ingress_type and expose_* flags via ANSIBLE_EXTRA_VARS ---
-# These are not stored in vars files because they are not org-specific settings;
-# they apply globally to every playbook in this run.
-export ANSIBLE_EXTRA_VARS="ingress_type=${INGRESS_TYPE} \
-expose_ca=${EXPOSE_CA} \
-expose_peer=${EXPOSE_PEER} \
-expose_orderer=${EXPOSE_ORDERER} \
-expose_peer_operations=${EXPOSE_PEER_OPERATIONS} \
-expose_orderer_operations=${EXPOSE_ORDERER_OPERATIONS} \
-expose_grpcweb=${EXPOSE_GRPCWEB}"
+# --- 3. Write ingress_type and expose_* flags into common-vars.yml ---
+# common-vars.yml is listed in vars_files: of every tutorial playbook, so writing
+# these values there is the standard, documented way to pass global vars without
+# modifying any playbook file or wrapping ansible-playbook.
+# (ansible-playbook -e @<file> also works per the Ansible CLI docs, but requires
+# patching every call site; writing to common-vars.yml avoids that.)
+yq -yi ".ingress_type=\"${INGRESS_TYPE}\""                           common-vars.yml
+yq -yi ".expose_ca=${EXPOSE_CA}"                                     common-vars.yml
+yq -yi ".expose_peer=${EXPOSE_PEER}"                                 common-vars.yml
+yq -yi ".expose_orderer=${EXPOSE_ORDERER}"                           common-vars.yml
+yq -yi ".expose_peer_operations=${EXPOSE_PEER_OPERATIONS}"           common-vars.yml
+yq -yi ".expose_orderer_operations=${EXPOSE_ORDERER_OPERATIONS}"     common-vars.yml
+yq -yi ".expose_grpcweb=${EXPOSE_GRPCWEB}"                           common-vars.yml
 
 # --- 4. Cleanup trap ---
 function cleanup {
@@ -571,14 +575,17 @@ trap - EXIT
 ./join_network.sh destroy
 ```
 
-> **Note on `ANSIBLE_EXTRA_VARS`:** Ansible automatically picks up this
-> environment variable and merges its contents as `--extra-vars` for every
-> `ansible-playbook` invocation in the shell session. This is the standard
-> mechanism for injecting global vars without modifying playbook files. It is used
-> here instead of `--extra-vars` on each call because the tutorial scripts
-> (`build_network.sh`, `join_network.sh`, `deploy_smart_contract.sh`) call
-> `ansible-playbook` directly and are not easily patched to accept additional
-> arguments.
+> **Note on variable injection:** `ANSIBLE_EXTRA_VARS` is **not** a recognised
+> Ansible environment variable and has no effect.  The standard documented
+> mechanism for passing extra vars from outside a playbook is
+> `ansible-playbook -e key=value` or `ansible-playbook -e @<vars-file>`
+> (the `@` prefix tells Ansible to read a YAML/JSON file; see the
+> [ansible-playbook CLI reference](https://docs.ansible.com/projects/ansible/latest/cli/ansible-playbook.html#cmdoption-ansible-playbook-e)).
+> The `-e @<file>` form would require every call site in `build_network.sh`,
+> `join_network.sh`, and `deploy_smart_contract.sh` to be patched.  Writing
+> the values into `common-vars.yml` — which every playbook already declares in
+> its `vars_files:` list — achieves the same result with no call-site changes
+> and stays within the `run-tests.sh` scope of this workstream.
 
 #### 5.3.4 Updated `fvtest.yml`
 
@@ -1458,8 +1465,9 @@ A migration is considered complete when all of the following pass:
    cluster): the runner dials peer `api_url` (`CORE_PEER_ADDRESS`), orderer
    `api_url` (`--orderer`), CA `api_url` (fabric-sdk-py enrolment), and all
    `operations_url` endpoints (`/healthz` via `wait_for()`) through the gateway's
-   `hostPort` mappings. `ANSIBLE_EXTRA_VARS` must include `expose_peer_operations=true`
-   and `expose_orderer_operations=true`. (See PRE-ANALYSIS §2.5.3.)
+   `hostPort` mappings. `common-vars.yml` must have `expose_peer_operations: true`
+   and `expose_orderer_operations: true` (written by `run-tests.sh` step 3).
+   (See PRE-ANALYSIS §2.5.3.)
 7. **[GW — CoreDNS]** The CoreDNS override is applied via `COREDNS_HOOK` **between**
    `build_network.sh build` and `join_network.sh join` (after the `fabric-gateway`
    Gateway resource exists), and correctly resolves `*.localho.st` to the Envoy
