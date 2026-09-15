@@ -84,3 +84,20 @@ The CA should remain passthrough rather than TLS-terminated. The current plan te
 In  @plan/move-ingress/MIGRATION-PLAN.md, ANSIBLE_EXTRA_VARS is referenced as a way to setup ansible extra variables. However there is no reference in ansible documentation (@https://docs.ansible.com/projects/ansible/latest/) about that ANSIBLE_EXTRA_VARS user can export to replace the ansible command inline `--extra-vars` parameter. Base on the ansible documentation, can you correct if necessary ? If not necessary, can you tell the documentation reference showing its possible to setup ansible command extra vars with `ANSIBLE_EXTRA_VARS` ?
 
 Use one file to setup all the extra vars (ingress_type and expose_*) and use ansible --extra-vars ability to read file like documented in @https://docs.ansible.com/projects/ansible/latest/cli/ansible.html.
+
+## Configurable Fabric Operations Console exposition
+
+Allthough the @plan/move-ingress/PRE-ANALYSIS.md is correct while stating the Fabric Operations Console must be reachable from the operator browser, we need to consider the case where we want to manually configure the Kubernetes ingress (nginx or Kubernetes Gateway API) to let the operator browser access the Fabric Operation Console. Check both @plan/move-ingress/PRE-ANALYSIS.md and @plan/move-ingress/MIGRATION-PLAN.md, apply necessary changes to introduce a new `expose_console` variable (default : true).
+
+--
+
+Can you complete the change by providing explanation about that `console_url` ? Where would that be used ?
+
+--
+
+Specify that `wait-for-console` task must use the Kubernetes Fabric Operation Console internal URL instead of using the one publicly exposed in case `expose_console=false`
+
+--
+
+For the `Print console URL`, do not require the user to pre-define the public URL through `console_url` variable but print that the current deployment didn't setup any Fabric Operation Console exposition as requested by the `expose_console` setup
+

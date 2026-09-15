@@ -260,9 +260,8 @@ The following endpoints are **never** called directly by any Ansible module:
 **Console (`api_endpoint`)**
 
 The console is the broker for every component lifecycle operation and is also the
-human-facing UI. It must be reachable from the Ansible control machine **and** from
-the operator's browser in all three scenarios. There is no scenario in which the
-console is optional as an external endpoint.
+human-facing UI. In the vast majority of deployments it must be reachable from the
+Ansible control machine **and** from the operator's browser.
 
 - Scenario A (in-cluster): the control machine can reach the console via
   `ClusterIP` for Ansible operations, but the browser of any human operator — from
@@ -270,7 +269,39 @@ console is optional as an external endpoint.
 - Scenarios B and C: the control machine is outside the cluster; an external route
   is mandatory for Ansible as well.
 
-**Conclusion: console external gateway route is always mandatory.**
+There is, however, a valid exception: operators who manage their own Kubernetes
+infrastructure may choose to configure the ingress entry point for the Fabric
+Operations Console **manually**, outside of Ansible automation — for example, by
+hand-crafting a `networking.k8s.io/v1 Ingress`, a custom `HTTPRoute`, or a
+platform-specific route object, optionally with TLS certificate management, OIDC
+middleware, or WAF rules that the collection cannot express. In these cases the
+collection must not create a conflicting route on top of the operator-managed one.
+
+Setting `expose_console: false` suppresses route creation entirely. The role then
+handles its two internal concerns differently:
+
+1. **Health-check (Ansible-internal):** the `wait-for-console` task must confirm
+   the console process is ready before Ansible proceeds to enrol identities. When
+   `expose_console: false` no external route exists, so the task polls the console's
+   **Kubernetes-internal ClusterIP Service URL**
+   (`http://{{ console }}.{{ namespace }}.svc.cluster.local:3000` or equivalent)
+   instead of any public HTTPS endpoint. This always works in Scenario A (the
+   control machine is in-cluster). For Scenarios B and C the same `kubeconfig` that
+   drives `kubernetes.core.k8s` can reach in-cluster Services via `kubectl
+   port-forward`; alternatively the role can watch `IBPConsole.status.conditions`
+   via `kubernetes.core.k8s_info` to avoid any direct HTTP connectivity requirement.
+
+2. **Informational print:** the `Print console URL` task is the end-of-role message
+   telling the operator where to point their browser. When `expose_console: false`
+   the collection has no knowledge of the externally-managed URL, so the task emits
+   an informational message stating that no console exposition was configured by the
+   collection and that the operator is responsible for providing access. No
+   user-supplied variable is required.
+
+**Conclusion: console external gateway route is required by default
+(`expose_console: true`). Set `expose_console: false` only when the ingress is
+managed externally; the health-check then uses the in-cluster Service URL and the
+print task emits a notice instead of a URL.**
 
 ---
 
@@ -405,7 +436,7 @@ design and cannot be meaningfully exposed through an ingress or gateway.
 
 | Service | Scenario A (in-cluster) | Scenario B (out-of-cluster, single) | Scenario C (multi-cluster) | Default `expose_*` | Listener |
 |---------|------------------------|------------------------------------|-----------------------------|-------------------|---------|
-| Console `api_endpoint` | ✅ mandatory (browser) | ✅ mandatory | ✅ mandatory | always on | HTTPS `:443` |
+| Console `api_endpoint` | ✅ mandatory (browser) | ✅ mandatory | ✅ mandatory | `expose_console: true` | HTTPS `:443` |
 | CA `api_url` | ❌ optional (ClusterIP) | ✅ mandatory | ✅ mandatory | `expose_ca: true` | TLS passthrough `:7054` |
 | Peer `api_url` (gRPC) | ❌ optional | ✅ mandatory | ✅ mandatory | `expose_peer: true` | TLS passthrough `:7051` |
 | Orderer `api_url` (gRPC) | ❌ optional | ✅ mandatory | ✅ mandatory | `expose_orderer: true` | TLS passthrough `:7050` |
@@ -423,6 +454,13 @@ disabling routes in KIND + Envoy Gateway, but setting `expose_peer_operations: f
 count and simplifies the `HTTPRoute` template. The `expose_grpcweb: false` default
 reflects the reality that gRPC-Web routes are never needed for Ansible automation;
 they are opt-in for human-facing console deployments.
+
+`expose_console: false` is a special case distinct from the other flags: it signals
+that the console ingress **wil be managed externally** by the cluster operator.
+The collection skips route creation, switches the health-check to the in-cluster
+ClusterIP Service URL (bypassing any external network path), and replaces the
+end-of-role URL print with a notice that no exposition was configured by the
+collection. No additional variable is required from the user.
 
 ### 2.5 Actual CI topology — Scenario B, not Scenario A
 

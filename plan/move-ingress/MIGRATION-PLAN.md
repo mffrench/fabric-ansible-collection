@@ -173,7 +173,11 @@ ingress_grpc_peer_port: 7051
 # can set expose_ca / expose_peer / expose_orderer to false and rely on ClusterIP
 # for Ansible reachability. See PRE-ANALYSIS §2.4 for the full rationale.
 #
-# Console is always exposed; there is no expose_console flag.
+# Set expose_console: false only when the console ingress will be managed externally
+# (e.g. a hand-crafted nginx Ingress or HTTPRoute). The collection then skips route
+# creation, health-checks the console via its in-cluster ClusterIP Service URL, and
+# prints a notice instead of a public URL. See PRE-ANALYSIS §2.4.3.
+expose_console: true        # Console HTTPRoute on HTTPS :443 (set false = external ingress)
 expose_ca: true             # CA api_url + operations_url on TLS passthrough :7054
 expose_peer: true           # Peer api_url on TLS passthrough :7051
 expose_orderer: true        # Orderer api_url on TLS passthrough :7050
@@ -895,7 +899,7 @@ Replace the three tasks (wait for ingress, set URL, wait for ingress to start) w
 a conditional block:
 
 ```yaml
-# [NGINX] Wait for console Ingress and derive URL
+# [NGINX] Wait for console Ingress and derive public URL
 - name: Wait for console Ingress to exist
   kubernetes.core.k8s_info:
     namespace: "{{ namespace }}"
@@ -906,14 +910,18 @@ a conditional block:
   until: console_route.resources
   retries: "{{ wait_timeout }}"
   delay: 1
-  when: ingress_type == 'nginx'
+  when:
+    - ingress_type == 'nginx'
+    - expose_console | bool
 
 - name: Set console URL from Ingress
   set_fact:
     console_url: "https://{{ console_route.resources[0].spec.rules[0].host }}"
-  when: ingress_type == 'nginx'
+  when:
+    - ingress_type == 'nginx'
+    - expose_console | bool
 
-# [GW] Wait for console HTTPRoute and derive URL
+# [GW] Wait for console HTTPRoute and derive public URL
 - name: Wait for console HTTPRoute to exist
   kubernetes.core.k8s_info:
     namespace: "{{ namespace }}"
@@ -924,15 +932,33 @@ a conditional block:
   until: console_httproute.resources
   retries: "{{ wait_timeout }}"
   delay: 1
-  when: ingress_type == 'gateway-api'
+  when:
+    - ingress_type == 'gateway-api'
+    - expose_console | bool
 
 - name: Set console URL from HTTPRoute
   set_fact:
     console_url: "https://{{ console_httproute.resources[0].spec.hostnames[0] }}"
-  when: ingress_type == 'gateway-api'
+  when:
+    - ingress_type == 'gateway-api'
+    - expose_console | bool
 
-# [BOTH] Health-check the console
-- name: Wait for console to respond
+# [expose_console=false] Health-check via in-cluster ClusterIP Service URL.
+# No external route exists; the console Service is always reachable from
+# within the cluster regardless of ingress_type.
+- name: Wait for console to respond (in-cluster Service URL)
+  uri:
+    url: "http://{{ console }}.{{ namespace }}.svc.cluster.local:3000"
+    status_code: "200"
+    validate_certs: no
+  register: result
+  until: result.status == 200
+  retries: "{{ wait_timeout }}"
+  delay: 1
+  when: not expose_console | bool
+
+# [expose_console=true] Health-check via the public URL derived above.
+- name: Wait for console to respond (public URL)
   uri:
     url: "{{ console_url }}"
     status_code: "200"
@@ -941,10 +967,23 @@ a conditional block:
   until: result.status == 200
   retries: "{{ wait_timeout }}"
   delay: 1
+  when: expose_console | bool
 
+# [expose_console=true] Print the public URL for the operator.
 - name: Print console URL
   debug:
     msg: "Fabric Operations Console available at {{ console_url }}"
+  when: expose_console | bool
+
+# [expose_console=false] Inform the operator that no exposition was configured.
+- name: Print console exposition notice
+  debug:
+    msg: >
+      Fabric Operations Console is running but no external exposition was
+      configured by this collection (expose_console=false). The ingress or
+      route for the console must be provisioned separately by the cluster
+      operator.
+  when: not expose_console | bool
 ```
 
 The same pattern applies to the equivalent block in
@@ -1003,9 +1042,16 @@ spec:
           port: {{ component_service_port }}
 ```
 
-The console `HTTPRoute` task carries only `when: ingress_type == 'gateway-api'` —
-there is no `expose_console` flag because the console is always required externally
-(see PRE-ANALYSIS §2.4.3).
+The console `HTTPRoute` task carries a two-condition `when` guard:
+
+```yaml
+when:
+  - ingress_type == 'gateway-api'
+  - expose_console | bool
+```
+
+Set `expose_console: false` to skip this task entirely when the console ingress is
+managed externally (see PRE-ANALYSIS §2.4.3).
 
 #### 5.6.2 Template: `TLSRoute` for CA API and operations (gated by `expose_ca`)
 
@@ -1321,13 +1367,20 @@ selected unless stated otherwise.
    Provide one tutorial with separate examples for both console roles. It must
    establish the exact `IBPConsole` Service name and generated hostname from the
    corresponding operator before documenting the HTTPS `HTTPRoute`, then verify that
-   route. The only new Gateway API input consumed by each console role is
-   `ingress_type: gateway-api`; `console_domain` and `console_tls_secret` remain the
-   role's existing required or optional console inputs. The tutorial must also point
-   to the `fabric_operator_crds` deployment that supplies the shared Gateway and
-   document its shared variables; console playbooks must not redundantly set
-   `gateway_class_name`, `ingress_domain`, `ingress_tls_secret`, or either gRPC port
-   unless they run that role too.
+   route. The tutorial must also point to the `fabric_operator_crds` deployment that
+   supplies the shared Gateway and document its shared variables; console playbooks
+   must not redundantly set `gateway_class_name`, `ingress_domain`,
+   `ingress_tls_secret`, or either gRPC port unless they run that role too.
+
+   The new Gateway API inputs consumed by each console role are:
+
+   | Variable | Default | Effect |
+   |----------|---------|--------|
+   | `ingress_type` | `nginx` | Set to `gateway-api` to enable Gateway API path. |
+   | `expose_console` | `true` | Set to `false` when the console ingress is managed externally. The collection then skips `HTTPRoute` creation, health-checks the console via its in-cluster ClusterIP Service URL, and prints a notice instead of a public URL. |
+
+   `console_domain` and `console_tls_secret` remain the role's existing required or
+   optional console inputs and are unchanged.
 
 3. **`endorsing_organization` — `gateway-api-endorsing-organization.rst`**
 
