@@ -101,3 +101,19 @@ Specify that `wait-for-console` task must use the Kubernetes Fabric Operation Co
 
 For the `Print console URL`, do not require the user to pre-define the public URL through `console_url` variable but print that the current deployment didn't setup any Fabric Operation Console exposition as requested by the `expose_console` setup
 
+## Divide and conquer !
+
+The current @plan/move-ingress/MIGRATION-PLAN.md is a bit heavy and we need to split into different deliverables steps:
+
+- step 1 : provide expose options with nginx ingress controller option only. In that first deliverable, we should focus on providing new tests case and tutorials to demonstrate there is no regression and how to handle the extrem opposite scenario where nothing is exposed through the NGINX ingress controller.
+- step 2 : provide a first implementation of Kubernetes Gateway API with expose_console=true only (other remains false). In that second deliverable, we should focus on providing a first HTTPRoute setup orchestration while we still keep NGINX ingress controller implementation as an option. Provide integration tests and tutorials. That step should be compliant with Kubernetes Gateway API 1.3
+- step 3 : provide a final implementation of Kubernetes Gateway API where all expose_* variables are set to true. In that third deliverable, we now provide Kubernetes API Gateway TLSRoute setup orchestration for the different components requiring it. NGINX ingress controller implementation is still an option and previous integrations tests and tutorials should continue work. New integrations tests and tutorials should be added to demonstrate the appropriate Kubernetes Gateway API implementation
+
+Provide a roadmap summary in @plan/move-ingress/MIGRATION-ROADMAP.md.
+
+For each sub-step X, provide a detailed plan in @plan/move-ingress/MIGRATION-STEP-X.md. The detailed plan should provide awaiting implementation changes but also new integration test to be implemented and new tutorials for final validation.
+
+--
+
+In step 3 the Gateway API version target is v1.6 but compatibility should remain with v1.3 in case we are using only HTTPRoute. Double check from Kubernetes Fabric Gateway documentation there is no breaking changes between the two versions  (provide URL sources of your analysis). Else provide a way to move smoothly from Gateway API v1.3 to Gateway API v1.6.
+
