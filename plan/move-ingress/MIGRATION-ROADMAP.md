@@ -1,10 +1,26 @@
 # Migration Roadmap: ingress-nginx → Kubernetes Gateway API
 
 This roadmap splits the full migration described in
-[`MIGRATION-PLAN.md`](./MIGRATION-PLAN.md) into three independently shippable
-deliverable steps. Each step is production-safe before the next one begins: the
+[`MIGRATION-PLAN.md`](./MIGRATION-PLAN.md) into four structured and independently shippable
+deliverable steps, beginning with Step 0 to establish a working CI and local test harness. Each step is production-safe before the next one begins: the
 nginx ingress controller path is never broken, and every step either adds new
 capability or extends an existing one behind a feature flag.
+
+---
+
+## Step 0 — Fix Existing CI & Local Test Harness
+
+**Goal:** Repair the baseline CI workflow (`.github/workflows/fvtest.yml`) and test runner script (`.github/scripts/run-tests.sh`) so that the baseline tutorial test suite passes cleanly on a fresh Kind cluster with NGINX.
+
+**Workstreams from MIGRATION-PLAN.md:** §5.3 (CI workflow & test runner repair), [`PRE-ANALYSIS.md`](./PRE-ANALYSIS.md) §2.5 (CI topology & external execution).
+
+**Key outcomes:**
+- Infrastructure deployment step added to CI workflow to install `fabric_operator_crds` and `fabric_console` before running tutorial tests.
+- `run-tests.sh` bug fixes: eliminates unbound argument crashes, generates unique `TEST_RUN_ID` per test execution, and injects active Console API endpoint and credentials into `tutorial/*-vars.yml`.
+- Validated local development environment (LDE) execution on macOS / Linux using Python 3.10 `venv` as documented in [`MIGRATION-PREREQ-LDE.md`](./MIGRATION-PREREQ-LDE.md).
+- Baseline CI test run on GitHub Actions exits 0.
+
+**See:** [`MIGRATION-STEP-0.md`](./MIGRATION-STEP-0.md)
 
 ---
 
@@ -29,8 +45,7 @@ W3 (CI test matrix stabilisation and `run-tests.sh` bug-fixes), partial W7
   `expose_console: false` (in-cluster URL health-check + notice message).
 - Both `nginx` expose-all and `nginx` expose-none scenarios are validated by
   the CI matrix and documented in tutorials.
-- `run-tests.sh` bugs (positional-arg crash, missing var injection, missing run
-  IDs) are fixed so the test runner is reliable for both expose scenarios.
+- `run-tests.sh` injects `ingress_type` and all `expose_*` variables into `common-vars.yml` for all test runs.
 
 **See:** [`MIGRATION-STEP-1.md`](./MIGRATION-STEP-1.md)
 
@@ -101,16 +116,19 @@ the `gateway-api` leg), remaining W7 (organization tutorials and migration guide
 ## Deliverable dependency graph
 
 ```
-Step 1 ──► Step 2 ──► Step 3
-  │           │           │
-  │      console      all routes
-  │      HTTPRoute    TLSRoutes
-  │      (GW API      + port changes
-  │       v1.3+)      + full CI
+Step 0 ──► Step 1 ──► Step 2 ──► Step 3
+  │          │           │           │
+  │          │      console      all routes
+  │          │      HTTPRoute    TLSRoutes
+  │          │      (GW API      + port changes
+  │          │       v1.3+)      + full CI
+  │          │
+  │        expose_* vars
+  │        nginx no-expose
+  │        scenario
   │
-expose_* vars
-nginx no-expose
-scenario
+CI & LDE baseline fixes
+(console deployment + runner repair)
 ```
 
 ## Deprecation timeline (unchanged from MIGRATION-PLAN.md §7)

@@ -1,21 +1,19 @@
 # Step 1 — Expose Options with NGINX Ingress Controller
 
-**Roadmap reference:** [`MIGRATION-ROADMAP.md`](./MIGRATION-ROADMAP.md) — Step 1  
-**Plan reference:** [`MIGRATION-PLAN.md`](./MIGRATION-PLAN.md) — W1, W4, partial W5, partial W3, partial W7  
+**Roadmap reference:** [`MIGRATION-ROADMAP.md`](./MIGRATION-ROADMAP.md) — Step 1
+**Plan reference:** [`MIGRATION-PLAN.md`](./MIGRATION-PLAN.md) — W1, W4, partial W5, partial W3, partial W7
+**Prerequisite:** [`MIGRATION-STEP-0.md`](./MIGRATION-STEP-0.md) (Baseline CI & Test Runner Fixes)
 **Status:** `[ ] pending`
 
 ---
 
 ## Overview
 
-This deliverable introduces all new Ansible variables (`ingress_type`, `expose_*`)
-and makes the collection's console wait-logic aware of the `expose_console` flag,
-while the **nginx ingress controller remains the only supported and tested ingress
-backend**. No Gateway API resources, templates, or CRDs are introduced yet.
+This deliverable builds on the working baseline established in **Step 0** ([`MIGRATION-STEP-0.md`](./MIGRATION-STEP-0.md)). It introduces all new Ansible variables (`ingress_type`, `expose_*`) and makes the collection's console wait-logic aware of the `expose_console` flag, while the **nginx ingress controller remains the only supported and tested ingress backend**. No Gateway API resources, templates, or CRDs are introduced yet.
 
 The primary goals of this step are:
 1. Establish the stable variable schema that Steps 2 and 3 will build on.
-2. Prove there is no regression in the current nginx-backed test suite.
+2. Prove there is no regression in the working nginx-backed test suite (Scenario B baseline from Step 0).
 3. Validate the extreme opposite scenario: a deployment where nothing is exposed
    through the NGINX ingress controller (`expose_console: false`,
    `expose_ca: false`, `expose_peer: false`, `expose_orderer: false`).
@@ -436,38 +434,25 @@ block is therefore skipped with an outer `when: not ingress_domain_is_cluster_lo
 
 ---
 
-## Sub-task 1.4 — `run-tests.sh` stabilisation
+## Sub-task 1.4 — `run-tests.sh` variable injection for Step 1 flags
 
-**Intent:** Fix the three known bugs in `.github/scripts/run-tests.sh` so the
-test runner is reliable and correctly injects variables into tutorial playbooks.
-These fixes are prerequisite for the CI matrix changes in sub-task 1.5.
+**Intent:** Extend the stabilized `run-tests.sh` (fixed in Step 0) to inject the newly introduced `INGRESS_TYPE` and `EXPOSE_*` variables into `tutorial/common-vars.yml`.
+
+*(Note: Baseline fixes for positional argument crashes, `TEST_RUN_ID` stamping, and connection variable injection are implemented in [`MIGRATION-STEP-0.md`](./MIGRATION-STEP-0.md) Sub-task 0.2).*
 
 **Expected outcomes:**
-- `run-tests.sh` does not crash with `unbound variable` when called with no
-  positional arguments.
-- `ingress_type` and all `expose_*` flags are written into `common-vars.yml`
-  before playbooks run.
-- Component names are stamped with a unique run ID to prevent collision.
-- Connection variables (`api_endpoint`, `api_authtype`, `api_key`, `api_secret`,
-  `api_timeout`, `k8s_namespace`, `wait_timeout`) are written into the per-org
-  vars files.
+- `run-tests.sh` reads `INGRESS_TYPE` (default: `nginx`) and all `EXPOSE_*` flags from the environment (defaulting to safe values).
+- `ingress_type` and `expose_*` flags are patched into `common-vars.yml` via `yq` prior to playbook execution.
 
 **Todo list:**
-- [ ] Replace `.github/scripts/run-tests.sh` with the new implementation from
-  MIGRATION-PLAN.md §5.3.3.
+- [ ] Update `.github/scripts/run-tests.sh` to include `yq` patching for `ingress_type` and the six `expose_*` boolean variables into `common-vars.yml`.
 - [ ] Confirm that `INGRESS_TYPE`, `EXPOSE_CA`, `EXPOSE_PEER`, `EXPOSE_ORDERER`,
   `EXPOSE_PEER_OPERATIONS`, `EXPOSE_ORDERER_OPERATIONS`, and `EXPOSE_GRPCWEB`
-  all default to safe values when not set by the environment.
-- [ ] Confirm `TEST_RUN_ID` / `SHORT_TEST_RUN_ID` generation works on macOS and
-  Linux (`shasum` vs `sha1sum` — the plan uses `shasum` which is available on
-  both via coreutils or via macOS built-in).
-- [ ] Confirm the `cleanup` trap and exit sequence matches the original script's
-  intent.
-- [ ] Run the script in dry-run mode (`bash -n run-tests.sh`) to check for
-  syntax errors.
+  all default to safe values when not explicitly set.
+- [ ] Verify `bash -n .github/scripts/run-tests.sh` passes syntax validation.
 
 **Relevant context:**
-- Current broken script: `.github/scripts/run-tests.sh`
+- Baseline script: `.github/scripts/run-tests.sh` (as delivered in Step 0)
 - Reference implementation: MIGRATION-PLAN.md §5.3.3
 - Variable injection rationale (why `common-vars.yml` instead of `-e @file`):
   MIGRATION-PLAN.md §5.3.1 and the note following §5.3.3
@@ -959,8 +944,7 @@ Scenario A (in-cluster only) tutorial.
 A Step 1 delivery is considered complete when all of the following pass:
 
 1. `ansible-lint` and `yamllint` pass on all modified files.
-2. `run-tests.sh` executes without positional arguments and without crashing
-   (`bash -n` syntax check passes; CI run exits 0).
+2. `run-tests.sh` correctly injects all `ingress_type` and `expose_*` variables into `common-vars.yml` (and passes `bash -n` validation).
 3. `fvtest.yml` matrix runs two legs: `nginx/expose-all` and
    `nginx/expose-none`; both complete successfully with `fail-fast: false`.
 4. The `nginx/expose-all` leg is byte-for-byte equivalent in test coverage to

@@ -262,6 +262,41 @@ In the case the end user provide `ingress-domain=*.svc.cluster.local` or `ingres
 
 In the case the end user provide `ingress-domain=*.svc.cluster.local` or `ingress-domain=svc.cluster.local` or `ingress-domain=<kubernetes local domain name space>` and at least on `expose_*=true`, then raise an error telling it's not possible to define `ingress-domain=<kubernetes local domain name space>` if some service are intended to be exposed.
 
+## Provide Step 0
+
+Document how to run CI tests in local Apple OSX environment where kind is already installed as well as ansible.
+
+---
+
+Improve @plan/move-ingress/MIGRATION-PREREQ-LDE.md to include [venv](https://docs.python.org/3/library/venv.html) usage and use python version 3.10 exactly.
+
+---
+
+When executing the test with Option A, I get following error:
+
+```
+TASK [hyperledger.fabric_ansible_collection.ordering_organization : Create certificate authority] **************************************************************************************************************************************************************************************************
+fatal: [localhost]: FAILED! => {"changed": false, "msg": "Failed to access the console: Failed to get console health: HTTP status code 404: b'<html>\\r\\n<head><title>404 Not Found</title></head>\\r\\n<body>\\r\\n<center><h1>404 Not Found</h1></center>\\r\\n<hr><center>nginx</center>\\r\\n</body>\\r\\n</html>\\r\\n'"}
+```
+
+Troubleshoot & fix
+
+---
+
+Create a new plan @plan/move-ingress/MIGRATION-STEP-0.md which will cover the way to fix existing CI tests.
+
+---
+
+Review @plan/move-ingress/MIGRATION-STEP-1.md so that any task reported in @plan/move-ingress/MIGRATION-STEP-0.md are not duplicated.
+
+---
+
+Review @plan/move-ingress/MIGRATION-ROADMAP.md so that it reflect all the step starting from step 0.
+
+---
+
+
+
 ## Wildcard HTTPs certificate provisioning
 
 The wildcard serving certificate is not currently provisioned. The HTTPS listener requires a valid *.<domain> certificate (e.g., via cert-manager). While the plan references a secret, it does not include its creation.
