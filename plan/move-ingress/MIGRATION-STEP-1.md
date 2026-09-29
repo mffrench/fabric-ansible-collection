@@ -26,7 +26,7 @@ The primary goals of this step are:
 playbooks continue to work without modification. This sub-task also introduces
 two new variables — `ingress_domain` and `cluster_domain` — and a derived fact
 `ingress_domain_is_cluster_local` that later sub-tasks (1.1b, 1.3b, 1.4b) use
-to decide whether CoreDNS rewrites and `api_url` port-patching are needed.
+to determine CoreDNS rewrite and dual-port service needs.
 
 **Expected outcomes:**
 - `roles/fabric_operator_crds/defaults/main.yml` contains `ingress_type: nginx`,
@@ -333,104 +333,101 @@ instead of a public URL.
 
 ---
 
-## Sub-task 1.3b — Post-creation `api_url` port patch for the `expose-none` scenario
+## Sub-task 1.3b — Strategic Merge Patch for port 443 on Operator Kubernetes Services (`expose-none` compatibility)
 
-**Intent:** After the operator provisions components and writes `api_url` values
-into the console registry, the URLs contain port `443` (derived from the Ingress
-hostname). When `expose_*: false` there is no Ingress in front of the component,
-so the port `443` URL is meaningless. This sub-task overwrites `api_url` and
-`operations_url` to use each component's **native port** while keeping the same
-ingress-domain hostname (preserving TLS SAN validity). The same URL format is
-reused in Step 3 where Gateway API TLS passthrough listeners are also bound to
-these native ports.
+**Intent:** When Fabric components are deployed, the Fabric Operator creates Custom Resources, ConfigMaps, and Console registration entries where port `443` is encoded across connection profiles and `api_url` endpoints. Updating the Fabric Operations Console registry via REST API `PUT` after deployment is insufficient because generated ConfigMaps, connection profiles, and client configs retain port `443` references. Furthermore, the Fabric Operator creates Kubernetes Services that only expose native container ports (`7051` for peer, `7050` for orderer, `7054` for CA, and operations ports).
 
-**Cluster-local domain exception:** When `ingress_domain_is_cluster_local` is
-`true` (all `expose_*` are already `false` by the guard in sub-task 1.1b), the
-operator generates component FQDNs of the form
-`<namespace>-<slug>-<role>.<namespace>.svc.<cluster_domain>`. These FQDNs are
-already at a port-free namespace-local address — the operator writes the correct
-native-port URL directly and no `PUT` patch is needed. The entire port-patch
-block is therefore skipped with an outer `when: not ingress_domain_is_cluster_local | bool`.
+To make in-cluster routing work seamlessly when `expose_*: false` without altering the Operator source code or mutating the console registry, apply a **Kubernetes Strategic Merge Patch** (`kubernetes.core.k8s` with `state: patched`) to the Services created by the Operator. This patch appends a `port: 443` mapping alongside the existing native ports:
+- **Peer Service**: adds `port: 443 -> targetPort: 7051` (alongside existing `7051` and `9443`).
+- **Orderer Service**: adds `port: 443 -> targetPort: 7050` (alongside existing `7050` and `8443`).
+- **CA Service**: adds `port: 443 -> targetPort: 7054` (alongside existing `7054` and `9443`).
+
+Because `spec.ports` in Kubernetes Services has `patchStrategy: merge` and `patchMergeKey: port`, applying this patch is non-destructive: it preserves the existing native port definitions while allowing traffic directed to `:443` (via CoreDNS rewrites in `expose-none`) to be forwarded directly to the pod's container port.
 
 **Expected outcomes:**
-- In the `expose-none` scenario with an external `ingress_domain`, every
-  registered component's `api_url` uses the native gRPC/HTTPS port instead of
-  `:443`.
-- The hostname portion of `api_url` is unchanged (e.g.
-  `fabricinfra-org1peer-peer.localho.st`).
-- The patch is a no-op when `expose_*: true` (the `when:` guard prevents execution).
-- The patch is also a no-op when `ingress_domain_is_cluster_local: true`
-  (no port fix needed; the operator-generated URL is already correct).
-- Three new `native_*_operations_port` variables are added to
-  `roles/fabric_operator_crds/defaults/main.yml`.
+- In the `expose-none` scenario, component Kubernetes Services listen on both port `443` and their native ports.
+- In-cluster requests routed via CoreDNS exact rewrites (`<ingress-fqdn>:443` -> `<svc>.<ns>.svc.<cluster_domain>:443`) connect directly to the running container port without passing through NGINX Ingress.
+- Three canonical port defaults (`ingress_grpc_peer_port: 7051`, `ingress_grpc_orderer_port: 7050`, `ingress_ca_port: 7054`) and operations port variables are documented in `roles/fabric_operator_crds/defaults/main.yml`.
 - `ansible-lint` passes on all modified task files.
 
-**Native port reference:**
+**Port Mapping Reference:**
 
-| Component | Native gRPC port variable      | Operations port variable              |
-|-----------|-------------------------------|---------------------------------------|
-| Peer      | `ingress_grpc_peer_port` (7051) | `native_peer_operations_port` (9443) |
-| Orderer   | `ingress_grpc_orderer_port` (7050) | `native_orderer_operations_port` (8443) |
-| CA        | `ingress_ca_port` (7054)      | `native_ca_operations_port` (9443)   |
+| Component | In-cluster Service Name | Added Port (Merge Patch) | Native TargetPort | Operations Port |
+|-----------|-------------------------|--------------------------|-------------------|-----------------|
+| **Peer**    | `<peer-slug>`            | `443/TCP` (name: `https-compat`) | `7051`            | `9443` (Ops)    |
+| **Orderer** | `<orderer-slug>`         | `443/TCP` (name: `https-compat`) | `7050`            | `8443` (Ops)    |
+| **CA**      | `<ca-slug>`              | `443/TCP` (name: `https-compat`) | `7054`            | `9443` (Ops)    |
 
 **Todo list:**
-- [ ] Add to `roles/fabric_operator_crds/defaults/main.yml` (alongside the port
-  variables added in sub-task 1.1):
+- [ ] Add the native and operations port variables to `roles/fabric_operator_crds/defaults/main.yml`:
   ```yaml
+  ingress_grpc_peer_port: 7051
+  ingress_grpc_orderer_port: 7050
+  ingress_ca_port: 7054
   native_peer_operations_port: 9443
   native_orderer_operations_port: 8443
   native_ca_operations_port: 9443
   ```
-- [ ] In `roles/fabric_console/tasks/k8s/create.yml`, after the block that calls
-  `ordering_organization` and `endorsing_organization` roles (i.e. after component
-  `api_url` values have been written to the console registry), add a conditional
-  block guarded by `not expose_peer | bool` / `not expose_orderer | bool` /
-  `not expose_ca | bool`. The concrete task YAML for the **peer** case is:
-  ```yaml
-  - name: Patch peer api_url to native port (expose-none)
-    uri:
-      url: "{{ api_endpoint }}/ak/api/v3/components/fabric-peer/{{ item.id }}"
-      method: PUT
-      headers:
-        Authorization: "Bearer {{ api_key }}"
-        Content-Type: "application/json"
-      body_format: json
-      body:
-        api_url: "grpcs://{{ item.api_url | urlsplit('hostname') }}:{{ ingress_grpc_peer_port }}"
-        operations_url: "https://{{ item.api_url | urlsplit('hostname') }}:{{ native_peer_operations_port }}"
-      status_code: 200
-    loop: "{{ registered_peers }}"
-    when: not expose_peer | bool
-  ```
-  Apply the same pattern for orderer (`fabric-orderer`, `ingress_grpc_orderer_port`,
-  `native_orderer_operations_port`, `api_url` scheme `grpcs`) and CA
-  (`fabric-ca`, `ingress_ca_port`, `native_ca_operations_port`, scheme `https`
-  for both `api_url` and `operations_url`).
-- [ ] Apply the identical block to
-  `roles/hlfsupport_console/tasks/k8s/create.yml` at the equivalent insertion
-  point (after its component-registration tasks).
-- [ ] Confirm that `registered_peers`, `registered_orderers`, and
-  `registered_cas` are the correct loop variable names (or determine the actual
-  variable names by reading the existing task files before implementing).
-- [ ] Add `when: not ingress_domain_is_cluster_local | bool` as an outer guard
-  on the entire port-patch block (wrapping all three component-type tasks) so
-  the block is silently skipped in the cluster-local domain mode.
-- [ ] Run `ansible-lint` on both modified task files.
+- [ ] In `roles/endorsing_organization/tasks/create.yml`:
+  - After CA creation and readiness, add a patch task for the CA Service:
+    ```yaml
+    - name: Patch CA Service with port 443 compatibility (expose-none)
+      kubernetes.core.k8s:
+        state: patched
+        kind: Service
+        name: "{{ ca_name | lower | replace(' ', '-') }}"
+        namespace: "{{ k8s_namespace | default(namespace) }}"
+        definition:
+          spec:
+            ports:
+              - name: https-compat
+                port: 443
+                targetPort: 7054
+                protocol: TCP
+      when: not expose_ca | default(true) | bool
+    ```
+  - After Peer creation and readiness, add a patch task for the Peer Service:
+    ```yaml
+    - name: Patch Peer Service with port 443 compatibility (expose-none)
+      kubernetes.core.k8s:
+        state: patched
+        kind: Service
+        name: "{{ peer_name | lower | replace(' ', '-') }}"
+        namespace: "{{ k8s_namespace | default(namespace) }}"
+        definition:
+          spec:
+            ports:
+              - name: https-compat
+                port: 443
+                targetPort: 7051
+                protocol: TCP
+      when: not expose_peer | default(true) | bool
+    ```
+- [ ] In `roles/ordering_organization/tasks/create.yml`:
+  - After Orderer node creation and readiness, add a patch task for the Orderer Service:
+    ```yaml
+    - name: Patch Orderer Service with port 443 compatibility (expose-none)
+      kubernetes.core.k8s:
+        state: patched
+        kind: Service
+        name: "{{ ordering_service_name | lower | replace(' ', '-') }}"
+        namespace: "{{ k8s_namespace | default(namespace) }}"
+        definition:
+          spec:
+            ports:
+              - name: https-compat
+                port: 443
+                targetPort: 7050
+                protocol: TCP
+      when: not expose_orderer | default(true) | bool
+    ```
+- [ ] Add `when: not ingress_domain_is_cluster_local | bool` where applicable so patch tasks run only when external-format FQDNs on port 443 are being redirected in-cluster.
+- [ ] Run `ansible-lint` on all modified task files in `roles/endorsing_organization` and `roles/ordering_organization`.
 
 **Relevant context:**
-- Port variables are declared in sub-task 1.1: `ingress_grpc_peer_port: 7051`,
-  `ingress_grpc_orderer_port: 7050`, `ingress_ca_port: 7054`.
-- The `urlsplit('hostname')` Jinja2 filter extracts the hostname from the
-  existing `api_url` value so the hostname is never hardcoded.
-- This block is inserted in both `fabric_console` and `hlfsupport_console` role
-  paths; the task structure differs between the two files — inspect each before
-  implementing.
-- Step 3 (Gateway API TLS passthrough) will use the same native ports; keeping
-  them as variables avoids a second change at that point.
-- When `ingress_domain_is_cluster_local: true` the operator writes
-  `api_url: grpcs://<svc>.<namespace>.svc.<cluster_domain>:<native-port>` natively;
-  no patch is needed and the `urlsplit('hostname')` logic would produce a
-  cluster-internal hostname anyway.
+- `kubernetes.core.k8s` with `state: patched` uses Kubernetes Strategic Merge Patch on core `v1/Service` resources.
+- Because `patchMergeKey` on `ports` is `port`, adding port `443` leaves the operator's native `7051`/`7050`/`7054` port entries intact.
+- This approach avoids mutating the Console registry database and avoids breaking ConfigMaps and client connection profiles that expect port `443`.
 
 ---
 
@@ -956,13 +953,11 @@ A Step 1 delivery is considered complete when all of the following pass:
    console health endpoint returns HTTP 200 in-cluster; peer (7051), orderer
    (7050), and CA (7054) native ports are reachable via ephemeral pods; ingress
    FQDNs resolve to Service ClusterIPs, not the nginx ClusterIP.
-6. `api_url` values in the console registry for all `expose-none` components
-   use native ports (sub-task 1.3b): `grpcs://<hostname>:7051` for peers,
-   `grpcs://<hostname>:7050` for orderers, `https://<hostname>:7054` for CAs.
+6. Component Kubernetes Services in `expose-none` mode are patched with `port: 443` (sub-task 1.3b), allowing in-cluster traffic to route successfully to container targetPorts without mutating console registry `api_url` entries.
 7. Cluster-local domain handling (sub-tasks 1.1 and 1.1b):
    - Setting `ingress_domain: <anything>.svc.<cluster_domain>` with all
      `expose_*: false` runs without error; no CoreDNS rewrites are applied and
-     the `api_url` port-patch block is skipped.
+     the Service port-patch block is skipped.
    - Setting `ingress_domain: <anything>.svc.<cluster_domain>` with any
      `expose_*: true` causes the play to fail immediately with a message listing
      the conflicting flags.

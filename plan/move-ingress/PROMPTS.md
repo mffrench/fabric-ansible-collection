@@ -295,7 +295,29 @@ Review @plan/move-ingress/MIGRATION-ROADMAP.md so that it reflect all the step s
 
 ---
 
+## Step 1 : revert to service port exposition
 
+The Hyperledger Operator publish CRs and many other ConfigMap where the 443 port usage is encoded everywhere. Consequently updating the Fabric Operations Console to use native port just after the component deployments will not be enough.
+
+Instead of updating the Fabric Operation Console within step1, work on a solution where we (re)define services listening both to port 443 and native ports.
+
+Rework the step1 (@plan/move-ingress/MIGRATION-STEP-1.md)
+
+---
+
+Explain a bit more how `ingress_grpc_peer_port`, `ingress_grpc_orderer_port` and `ingress_ca_port` are used to setup appropriately underlying service
+
+---
+
+In step1, there is no Kubernetes Gateway API to consider. these new parameters (`ingress_grpc_peer_port` ...) seems new and not sure these could be appropriately managed by the Fabric Operator which is creating the service. Can you review Fabric Operator source code (@https://github.com/hyperledger-labs/fabric-operator) and double check how the services are spawned ?
+
+---
+
+From what you explain, this is not possible for the Operation Console to instruct the Hyperledger Operator to create service with additional port without changing the Hyperledger Operator. Can you look on a way to update the existing service created by the operator to add that new 443 port to listen to ?
+
+---
+
+Rework the step1 (@plan/move-ingress/MIGRATION-STEP-1.md)
 
 ## Wildcard HTTPs certificate provisioning
 

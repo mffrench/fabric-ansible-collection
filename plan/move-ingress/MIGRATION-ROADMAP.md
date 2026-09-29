@@ -88,8 +88,10 @@ peers (`expose_peer`), orderers (`expose_orderer`), and CAs (`expose_ca`), plus
 the optional operations `HTTPRoute`s (`expose_peer_operations`,
 `expose_orderer_operations`) and the gRPC-Web `HTTPRoute` (`expose_grpcweb`). The
 four-listener `Gateway` topology (HTTPS `:443`, CA passthrough `:7054`, orderer
-passthrough `:7050`, peer passthrough `:7051`) is fully operational. The NGINX
-ingress controller path remains supported and all prior tests continue to pass.
+passthrough `:7050`, peer passthrough `:7051`) is fully operational. Starting Step 3,
+the Kubernetes Gateway API requirement minimum version is **1.6** (due to `TLSRoute`
+advancements and experimental features promotion). The NGINX ingress controller path
+remains supported and all prior tests continue to pass.
 
 **Workstreams from MIGRATION-PLAN.md:** Remaining §5.6.2–§5.6.9 of W6 (all
 route templates and post-tasks), §6 (port change impact on plugin modules and
@@ -120,8 +122,9 @@ Step 0 ──► Step 1 ──► Step 2 ──► Step 3
   │          │           │           │
   │          │      console      all routes
   │          │      HTTPRoute    TLSRoutes
-  │          │      (GW API      + port changes
-  │          │       v1.3+)      + full CI
+  │          │      (GW API      (GW API v1.6+)
+  │          │       v1.3+)      + port changes
+  │          │                   + full CI
   │          │
   │        expose_* vars
   │        nginx no-expose
