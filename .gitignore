@@ -2,6 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
+# HLF local env testing assets
+bin
+builders
+config
+
+# K8S local env testing assets
+_cfg
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

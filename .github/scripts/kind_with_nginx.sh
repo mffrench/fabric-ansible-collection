@@ -115,6 +115,12 @@ function start_nginx() {
 function apply_coredns_override() {
   CLUSTER_IP=$(kubectl -n ingress-nginx get svc ingress-nginx-controller -o json | jq -r .spec.clusterIP)
 
+  # Derive the nip.io domain from the API server address so that wildcard DNS
+  # for that domain is also routed to the nginx ingress inside the cluster.
+  # Without this, pods resolve *.nip.io via upstream DNS which returns 127.0.0.1
+  # (the pod's own loopback) instead of the nginx cluster IP.
+  NIP_DOMAIN=$(echo "${KIND_API_SERVER_ADDRESS:-127.0.0.1}" | tr -s '.' '-').nip.io
+
   cat << EOF | kubectl apply -f -
 ---
 kind: ConfigMap
@@ -131,6 +137,7 @@ data:
         }
         ready
         rewrite name regex (.*)\.localho\.st host.ingress.internal
+        rewrite name regex (.*)\.${NIP_DOMAIN} host.ingress.internal
         hosts {
           ${CLUSTER_IP} host.ingress.internal
           fallthrough
@@ -152,6 +159,7 @@ data:
 EOF
 
   kubectl -n kube-system rollout restart deployment/coredns
+  kubectl rollout status deployment/coredns -n kube-system --timeout=60s
 }
 
 function launch_docker_registry() {
@@ -191,4 +199,7 @@ EOF
 kind_with_nginx
 
 mkdir -p _cfg
-kubectl config view --raw > _cfg/k8s_context.yaml
+# Use 'kind get kubeconfig' rather than 'kubectl config view --raw' so the
+# cluster context is read directly from Kind's state regardless of whether
+# ~/.kube/config has been populated.
+kind get kubeconfig --name "${KIND_CLUSTER_NAME}" > _cfg/k8s_context.yaml

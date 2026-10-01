@@ -1,9 +1,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
-#
 ansible
+ansible-core>=2.15,<2.18
 ansible-doc-extractor
 ansible-lint
+cryptography==42.0.8
 flake8
 fabric-sdk-py
 openshift

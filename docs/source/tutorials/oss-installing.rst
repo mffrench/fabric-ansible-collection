@@ -16,6 +16,22 @@ Ensure that you have installed all of the prerequisite software described in `In
 
 You must have access to a Kubernetes Service or Red Hat OpenShift cluster that is supported for use with Hyperledger Fabric Open Source Stack. To get an idea of the supported platforms and resource requirements, you can reference the following documentation: https://www.ibm.com/docs/en/hlf-support/1.0.0?topic=kubernetes-deploying-support-hyperledger-fabric
 
+Resource Requirements
+^^^^^^^^^^^^^^^^^^^^^
+
+Deploying the Fabric Operations Console and its dependencies requires sufficient cluster node capacity:
+
+- **Console Pod Resources**: The console pod runs multiple containers (``console``, ``couchdb``, ``deployer``, ``configtxlator``). In particular, the ``couchdb`` and ``console`` containers require **256 MiB memory request** each. The total console pod requires approximately **660 MiB** allocatable memory request.
+- **Local Testing (Kind / Minikube / Docker)**: When running in a local environment, ensure your container runtime (Docker Desktop / Colima) is allocated at least **8 GB RAM and 4 CPUs** to avoid CouchDB or Console memory exhaustion.
+
+Architecture & Local Development (ARM64 / Apple Silicon)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The roles use **``arch``** to match your Kubernetes cluster node label (``kubernetes.io/arch``):
+
+- On **Apple Silicon / ARM64** machines running local Kind or Docker Desktop, specify ``arch: arm64``.
+- On **x86_64 / Intel / CI runners**, specify ``arch: amd64``.
+
 If you have a Kubernetes cluster, you must have the Kubernetes CLI (``kubectl``) installed and configured to use your Kubernetes cluster. Verify that it is working by running the following command:
 
 ::
