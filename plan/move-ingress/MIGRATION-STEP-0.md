@@ -2,7 +2,7 @@
 
 **Roadmap reference:** Pre-requisite step for [`MIGRATION-STEP-1.md`](./MIGRATION-STEP-1.md)  
 **Plan reference:** [`MIGRATION-PLAN.md`](./MIGRATION-PLAN.md) — §5.3, [`PRE-ANALYSIS.md`](./PRE-ANALYSIS.md) — §2.5  
-**Status:** `[ ] pending`
+**Status:** `[x] complete`
 
 ---
 

@@ -262,7 +262,7 @@ In the case the end user provide `ingress-domain=*.svc.cluster.local` or `ingres
 
 In the case the end user provide `ingress-domain=*.svc.cluster.local` or `ingress-domain=svc.cluster.local` or `ingress-domain=<kubernetes local domain name space>` and at least on `expose_*=true`, then raise an error telling it's not possible to define `ingress-domain=<kubernetes local domain name space>` if some service are intended to be exposed.
 
-## Provide Step 0
+## Provide Step 0 Plan
 
 Document how to run CI tests in local Apple OSX environment where kind is already installed as well as ansible.
 
@@ -318,6 +318,191 @@ From what you explain, this is not possible for the Operation Console to instruc
 ---
 
 Rework the step1 (@plan/move-ingress/MIGRATION-STEP-1.md)
+
+---
+
+in @plan/move-ingress/MIGRATION-ROADMAP.md, tell that, starting Step 3, the K8S Gateway API requirement minimal version will be 1.6.
+
+## Execute Step 0 Plan
+
+Execute plan @plan/move-ingress/MIGRATION-STEP-0.md.
+
+---
+
+When running `./.github/scripts/run-tests.sh`, I get following error:
+
+```
+TASK [hyperledger.fabric_ansible_collection.endorsing_organization : Delete certificate authority] *************************************************************************************************************************************************************************************************
+fatal: [localhost]: FAILED! => {"changed": false, "msg": "Failed to access the console: Failed to get console health: HTTP status code 404: b'<html>\\r\\n<head><title>404 Not Found</title></head>\\r\\n<body>\\r\\n<center><h1>404 Not Found</h1></center>\\r\\n<hr><center>nginx</center>\\r\\n</body>\\r\\n</html>\\r\\n'"}
+```
+
+Troubleshoot and fix
+
+---
+
+Running `export KUBECONFIG="$PWD/_cfg/k8s_context.yaml" ; .github/scripts/deploy-console.sh`, I get following error:
+
+```
+TASK [hyperledger.fabric_ansible_collection.fabric_operator_crds : Fail if architecture not specified] *********************************************************************************************************************************************************************************************
+fatal: [localhost]: FAILED! => {"changed": false, "msg": "arch not specified or is not one of \"amd64\""}
+```
+
+Troubleshoot and fix
+
+---
+
+Running `export KUBECONFIG="$PWD/_cfg/k8s_context.yaml" ; .github/scripts/deploy-console.sh`, the script is hanging on step :
+
+```
+TASK [hyperledger.fabric_ansible_collection.fabric_console : Wait for console deployment to exist] *************************************************************************************************************************************************************************************************
+FAILED - RETRYING: [localhost]: Wait for console deployment to exist (600 retries left).
+ok: [localhost]
+
+TASK [hyperledger.fabric_ansible_collection.fabric_console : Wait for console deployment to start] *************************************************************************************************************************************************************************************************
+```
+
+Troubleshoot and fix
+
+---
+
+You need to distinguish architecture in case we deploy pod from an image (should always be amd64) and arch where you define affinity (should match the host arch)
+
+---
+
+Getting following error now :
+
+```
+TASK [hyperledger.fabric_ansible_collection.fabric_operator_crds : Fail if architecture not specified] *********************************************************************************************************************************************************************************************
+fatal: [localhost]: FAILED! => {"changed": false, "msg": "arch not specified or is not one of \"amd64\""}
+```
+
+Troubleshoot and fix
+
+---
+
+Looking state of HLF Console, I see this:
+
+```
+╰─$ kubectl get pods -A
+NAMESPACE            NAME                                         READY   STATUS             RESTARTS     AGE
+default              fabric-operator-ddd5b95c7-nvf9d              1/1     Running            0            18m
+default              hlf-console-65cd787598-6b59c                 2/4     CrashLoopBackOff   3 (4s ago)   83s
+```
+
+Troubleshoot and fix
+
+---
+
+Running `.github/scripts/run-tests.sh`
+
+I get again that error :
+
+```
+TASK [hyperledger.fabric_ansible_collection.endorsing_organization : Delete certificate authority] *************************************************************************************************************************************************************************************************
+fatal: [localhost]: FAILED! => {"changed": false, "msg": "Failed to access the console: Failed to get console health: URLError: <urlopen error [Errno 51] Network is unreachable>"}
+```
+
+Troubleshoot and fix
+
+---
+
+Now we are getting that error :
+
+```
+TASK [hyperledger.fabric_ansible_collection.endorsing_organization : Delete certificate authority] *************************************************************************************************************************************************************************************************
+fatal: [localhost]: FAILED! => {"changed": false, "msg": "Failed to access the console: Failed to get console health: HTTP status code 401: b'Unauthorized'"}
+```
+
+---
+
+Got that error while running `.github/scripts/run-tests.sh`:
+
+```
+TASK [hyperledger.fabric_ansible_collection.ordering_organization : Create ordering service] *******************************************************************************************************************************************************************************************************
+fatal: [localhost]: FAILED! => {"changed": false, "msg": "Failed to create ordering service: HTTP status code 500: {'statusCode': 500, 'msg': [{'name': 'orderingservice6ca44ccdnode1', 'crypto': {'enrollment': {'component': {'cahost': 'default-orderingorg6ca44ccdca-ca.127-0-0-1.nip.io', 'caport': '443', 'caname': 'ca', 'catls': {'cacert': ...
+..., 'replicas': 1}]}"}
+```
+
+Troubleshoot and fix
+
+---
+
+Auth is working. Here's the summary:
+
+Root Cause
+The Fabric Operations Console uses the admin email address as the username for Basic auth — set via console_email at deploy time (admin@example.com). The api_key in the vars files and _cfg/console-env.sh was set to "admin", which is not a valid username in the console's access list, causing every authenticated API call to return HTTP 401 Unauthorized.
+
+Changes
+.github/scripts/deploy-console.sh
+
+API_KEY in the generated _cfg/console-env.sh now uses ${CONSOLE_EMAIL} (i.e. admin@example.com) instead of the hardcoded string "admin".
+
+.github/workflows/fvtest.yml
+
+API_KEY exported to $GITHUB_ENV changed from admin → admin@example.com to match.
+
+_cfg/console-env.sh updated in-place for the current running cluster.
+
+
+Got that error while running `.github/scripts/run-tests.sh`:
+
+
+
+```
+
+TASK [hyperledger.fabric_ansible_collection.ordering_organization : Create ordering service] *******************************************************************************************************************************************************************************************************
+
+fatal: [localhost]: FAILED! => {"changed": false, "msg": "Failed to create ordering service: HTTP status code 500: {'statusCode': 500, 'msg': [{'name': 'orderingservice6ca44ccdnode1', 'crypto': {'enrollment': {'component': {'cahost': 'default-orderingorg6ca44ccdca-ca.127-0-0-1.nip.io', 'caport': '443', 'caname': 'ca', 'catls': {'cacert': ...
+..., 'replicas': 1}]}"}
+
+```
+
+Troubleshoot and fix
+
+---
+
+When executing :
+
+```
++ ansible-playbook 02-create-endorsing-organization-components.yml
+
+[WARNING]: No inventory was parsed, only implicit localhost is available
+
+[WARNING]: provided hosts list is empty, only localhost is available. Note that the implicit localhost does not match 'all'
+....
+TASK [hyperledger.fabric_ansible_collection.endorsing_organization : Create peer] ******************************************************************************************************************************************************************************************************************
+```
+
+I see :
+
+```
+kubectl get pods -A
+
+NAMESPACE            NAME                                            READY   STATUS             RESTARTS     AGE
+
+default              fabric-operator-ddd5b95c7-6kt2t                 1/1     Running            0            13m
+
+default              hlf-console-697cfcd77-rc5wf                     4/4     Running            0            13m
+
+default              orderingorg0f5fd51cca-7464c7584b-7q9dn          1/1     Running            0            4m16s
+
+default              orderingservice0f5fd51cnode1-86bbbbb949-76gmt   2/2     Running            0            3m21s
+
+default              org1ca0f5fd51c-56bbcd46d8-9mxv2                 1/1     Running            0            2m31s
+
+default              org1peer0f5fd51c-b94685fdd-bq8kz                2/3     CrashLoopBackOff   3 (5s ago)   78s
+```
+
+Troubleshoot and fix
+
+---
+
+For the Fabric Operation Console, you changed the required memory for its couchdb container in @role/fabric_console/templates/k8s/hlf-operations-console.yaml.j2. Can you look a way to report these changes in the tutorial ?
+
+---
+
+Can you look a way to remove CouchDB from the HLF Peer Pod and use GoLevelDB as the world state ?
+
 
 ## Wildcard HTTPs certificate provisioning
 

@@ -117,34 +117,50 @@ The test environment sets up a Kind cluster with an NGINX Ingress controller bou
 
 ---
 
-## 6. Run the Tests
+## 6. Deploy Fabric Operator & Console
 
-### Option A: Running the Tutorial Test Suite Directly
-
-The test suite runs through `build_network.sh`, `join_network.sh`, `deploy_smart_contract.sh`, and teardown:
+Before running any tests the Fabric Operator CRDs and the Fabric Operations Console
+must be deployed into the cluster. The helper script does this and writes connection
+details to `_cfg/console-env.sh`:
 
 ```bash
-cd tutorial
-
-# 1. Build the network (Ordering Org, Org1, consortium, channel setup)
-./build_network.sh build
-
-# 2. Join Org2 to the consortium and channel
-./join_network.sh join
-
-# 3. Deploy the smart contract (FabCar package lifecycle & test transactions)
-./deploy_smart_contract.sh
-
-# 4. Clean up / destroy components when done
-./join_network.sh destroy
+export KUBECONFIG="$PWD/_cfg/k8s_context.yaml"
+.github/scripts/deploy-console.sh
 ```
+
+The script prints the console `API_ENDPOINT` it derived and waits for the console
+deployment to become ready (`wait_timeout=600 s`).
+
+### 6.1 (Optional) Deprovision Fabric Operator & Console
+
+To tear down the console and operator CRDs without destroying the entire Kind cluster:
+
+```bash
+export KUBECONFIG="$PWD/_cfg/k8s_context.yaml"
+.github/scripts/undeploy-console.sh
+```
+
+---
+
+## 7. Run the Tests
+
+With the console deployed, run the full FV test suite:
+
+```bash
+export KUBECONFIG="$PWD/_cfg/k8s_context.yaml"
+.github/scripts/run-tests.sh
+```
+
+`run-tests.sh` automatically sources `_cfg/console-env.sh` when it exists, so no
+manual `export API_ENDPOINT=…` is required after `deploy-console.sh` has run.
 
 ### Option B: Running with `run-tutorial-tests.sh` (Parameterized / Multi-run)
 
-If testing against an existing Fabric Operations Console endpoint:
+If testing against an existing Fabric Operations Console endpoint (e.g. a remote
+cluster), export the connection variables explicitly:
 
 ```bash
-export API_ENDPOINT="https://127.0.0.1.nip.io:443"
+export API_ENDPOINT="https://<namespace>-<console-name>-console.<domain>"
 export API_AUTHTYPE="basic"
 export API_KEY="admin"
 export API_SECRET="password"
@@ -156,8 +172,31 @@ export USE_DOCKER="false"
 
 ---
 
-## 7. macOS Troubleshooting Tips
+## 8. macOS Troubleshooting Tips
 
 - **Port 80 / 443 Conflicts**: If Apache/httpd or another local web server is bound to port 80/443 on macOS, stop it (`sudo apachectl stop`) before launching the Kind cluster.
 - **Docker Memory Limits**: Hyperledger Fabric nodes (orderers, peers, chaincode containers, couchdb) require sufficient memory. Ensure Docker Desktop has at least **8 GB RAM** allocated in **Settings > Resources**.
 - **DNS Resolution**: `*.localho.st` and `*.nip.io` domains are resolved via CoreDNS overrides in the cluster. If host resolution fails locally, verify `ping 127-0-0-1.nip.io` resolves to `127.0.0.1`.
+
+---
+
+## 9. Validation Checklist
+
+Work through each item in order before declaring the LDE ready.
+
+- [ ] Kind cluster boots and NGINX Ingress controller pod becomes `Ready`
+  ```bash
+  kubectl wait --namespace ingress-nginx \
+    --for=condition=ready pod \
+    --selector=app.kubernetes.io/component=controller \
+    --timeout=3m
+  ```
+- [ ] Operator CRDs and Console deploy without error (`deploy-console.sh` exits 0).
+- [ ] Console `/health` endpoint responds with HTTP 200:
+  ```bash
+  source _cfg/console-env.sh
+  curl -sk "${API_ENDPOINT}/health" | jq .
+  # Expected: HTTP 200 with a healthy-status payload
+  ```
+- [ ] Tutorial playbooks (01 to 23) complete successfully (`run-tests.sh` exits 0).
+- [ ] Network teardown plays (`join_network.sh destroy`) cleanly delete all created resources.

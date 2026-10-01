@@ -53,9 +53,12 @@ Parameters
     | **Type**: str
 
   arch (required)
-    ``amd64`` - Specify this if the architecture of the cluster is amd64.
+    The architecture of the Kubernetes nodes in the cluster (e.g. ``amd64``, ``arm64``, ``s390x``).
+
+    This variable is passed as ``spec.arch`` in the IBPConsole custom resource so the operator can schedule pods onto the correct nodes.
 
     | **Type**: str
+    | **Choices**: ``amd64``, ``arm64``, ``s390x``
 
   namespace
     The name of the Kubernetes namespace to deploy the console to. The namespace will be created if it does not exist.
