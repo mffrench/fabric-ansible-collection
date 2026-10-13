@@ -30,6 +30,13 @@
     tools_image: hyperledger/fabric-tools
     tools_image_label: 2.4.4
     wait_timeout: "{{ wait_timeout | default(600) }}"
+  pre_tasks:
+    # The console below is created inline rather than through the fabric_console
+    # role, so run that role's ingress and exposure checks explicitly.
+    - name: Check ingress and exposure settings
+      ansible.builtin.include_role:
+        name: hyperledger.fabric_ansible_collection.fabric_console
+        tasks_from: k8s/exposure_checks.yml
   roles:
     - hyperledger.fabric_ansible_collection.fabric_operator_crds
 

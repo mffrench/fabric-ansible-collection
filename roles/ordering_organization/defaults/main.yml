@@ -24,6 +24,17 @@ ordering_service_nodes: 1
 # ordering_service_resources:
 # ordering_service_storage:
 # ordering_service_version:
+# Kubernetes only. expose_ca, expose_orderer: whether the certificate authority and the
+# ordering service nodes are reachable through the ingress created by the operator. When a flag
+# is false, the role creates one ClusterIP Service per endpoint of that component,
+# mapping port 443 to the endpoint's container port, for the cluster DNS to send
+# the component URLs to (see the k8s_endpoint_services role). This needs the
+# kubernetes.core collection, a kubeconfig, and namespace.
+expose_ca: true
+expose_orderer: true
+# namespace: the Kubernetes namespace of the console and of the components it
+# creates. Only used when a component is not exposed.
+namespace: ""
 wallet: "{{ playbook_dir }}"
 ca_admin_identity: "{{ wallet }}/{{ ca_name }} Admin.json"
 organization_admin_identity: "{{ wallet }}/{{ organization_name }} Admin.json"

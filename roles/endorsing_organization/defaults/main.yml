@@ -25,6 +25,17 @@ peer_name: "{{ organization_name }} Peer"
 # peer_storage:
 peer_state_db: couchdb
 # peer_version:
+# Kubernetes only. expose_ca, expose_peer: whether the certificate authority and the
+# peers are reachable through the ingress created by the operator. When a flag
+# is false, the role creates one ClusterIP Service per endpoint of that component,
+# mapping port 443 to the endpoint's container port, for the cluster DNS to send
+# the component URLs to (see the k8s_endpoint_services role). This needs the
+# kubernetes.core collection, a kubeconfig, and namespace.
+expose_ca: true
+expose_peer: true
+# namespace: the Kubernetes namespace of the console and of the components it
+# creates. Only used when a component is not exposed.
+namespace: ""
 wallet: "{{ playbook_dir }}"
 ca_admin_identity: "{{ wallet }}/{{ ca_name }} Admin.json"
 organization_admin_identity: "{{ wallet }}/{{ organization_name }} Admin.json"

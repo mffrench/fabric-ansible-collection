@@ -1,0 +1,17 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+- name: Determine the Services to delete
+  include_tasks: names.yml
+
+- name: Delete the Services of the component endpoints
+  kubernetes.core.k8s:
+    state: absent
+    api_version: v1
+    kind: Service
+    namespace: "{{ k8s_endpoint_services_namespace }}"
+    name: "{{ item.name }}"
+  loop: "{{ k8s_endpoint_services_services }}"
+  loop_control:
+    label: "{{ item.name }}"

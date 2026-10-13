@@ -1,0 +1,24 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# Run after the component is created: every URL the console reports for it
+# must match one of the Services created by main.yml. This catches a wrong
+# custom resource name or a missing endpoint type that the module's own health
+# check does not use (grpcweb, admin).
+- name: Determine the Services that were created
+  include_tasks: names.yml
+
+- name: Fail if a component URL has no matching Service
+  assert:
+    that:
+      - _service_name in (k8s_endpoint_services_services | map(attribute='name') | list)
+    fail_msg: >-
+      The console reports the URL '{{ item }}', but no Service named
+      '{{ _service_name }}' was created. Check k8s_endpoint_services_cr_name_regex
+      and k8s_endpoint_services_orderer_node_suffix against the custom resource
+      names created by the console.
+    quiet: true
+  loop: "{{ k8s_endpoint_services_urls | select | list }}"
+  vars:
+    _service_name: "{{ (item | urlsplit('hostname')).split('.') | first }}"

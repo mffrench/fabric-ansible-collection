@@ -189,6 +189,29 @@ Parameters
     | **Type**: list
     | **Elements**: str
 
+  expose_ca
+    Whether the certificate authority is reachable from outside the cluster, through the ingress created by the operator. Kubernetes only.
+
+    When ``false``, the role creates one ClusterIP Service per endpoint of the certificate authority, mapping port 443 to the endpoint's container port, so that the cluster DNS can send the certificate authority URLs to it. See `k8s_endpoint_services <./k8s_endpoint_services.html>`_. This requires the ``kubernetes.core`` collection, a kubeconfig, and *namespace*.
+
+    | **Type**: bool
+    | **Default value**: ``true``
+
+  expose_orderer
+    Whether the ordering service nodes are reachable from outside the cluster, through the ingress created by the operator. Kubernetes only.
+
+    When ``false``, the role creates one ClusterIP Service per endpoint of each ordering service node (orderer, admin, operations, grpcweb), as for *expose_ca*.
+
+    | **Type**: bool
+    | **Default value**: ``true``
+
+  namespace
+    The Kubernetes namespace of the console and of the components it creates.
+
+    Only used, and then required, when *expose_ca* or *expose_orderer* is ``false``.
+
+    | **Type**: str
+
   wallet
     The wallet directory to store identity files in.
 

@@ -1,0 +1,35 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# The operator advertises every endpoint of every component on port 443
+# (<namespace>-<CR name>-<endpoint>.<domain>:443), and its own Service for a
+# component cannot map 443 to more than one container port. When a component is
+# not exposed through the ingress, this role creates one ClusterIP Service per
+# endpoint instead, each mapping 443 to that endpoint's container port. The
+# operator's own Services are not modified.
+- name: Determine the Services to create
+  include_tasks: names.yml
+
+- name: Fail if a Service name is not a valid DNS label
+  assert:
+    that:
+      - item.name is match('^[a-z]([-a-z0-9]*[a-z0-9])?$')
+      - item.name | length <= 63
+    fail_msg: >-
+      Service name '{{ item.name }}' is not a valid DNS label (lower case letters,
+      digits and '-', 63 characters at most). Shorten the namespace or the
+      component name.
+    quiet: true
+  loop: "{{ k8s_endpoint_services_services }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create one ClusterIP Service per component endpoint
+  kubernetes.core.k8s:
+    state: present
+    namespace: "{{ k8s_endpoint_services_namespace }}"
+    resource_definition: "{{ lookup('template', 'service.yaml.j2') }}"
+  loop: "{{ k8s_endpoint_services_services }}"
+  loop_control:
+    label: "{{ item.name }}"

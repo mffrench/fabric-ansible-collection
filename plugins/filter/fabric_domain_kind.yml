@@ -1,0 +1,42 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+DOCUMENTATION:
+  name: fabric_domain_kind
+  author: Hyperledger Fabric Ansible Collection contributors
+  short_description: Classify a console domain against the Kubernetes cluster domain
+  description:
+    - The operator builds every component FQDN as C(<ns>-<name>-<role>.<domain>).
+    - Returns C(external) when the domain is outside the cluster domain.
+    - Returns C(internal) when the domain is C(<namespace>.svc.<cluster_domain>).
+      Component FQDNs then only resolve if a Service named C(<ns>-<name>-<role>) exists.
+    - Returns C(invalid) for any other domain inside the cluster domain, because
+      component FQDNs built from it can never resolve.
+  positional: namespace, cluster_domain
+  options:
+    _input:
+      description: The console domain to classify.
+      type: str
+      required: true
+    namespace:
+      description: The Kubernetes namespace of the console and its components.
+      type: str
+      required: true
+    cluster_domain:
+      description: The DNS zone served by the cluster DNS.
+      type: str
+      default: cluster.local
+
+EXAMPLES: |
+  # => 'external'
+  kind: "{{ 'example.com' | hyperledger.fabric_ansible_collection.fabric_domain_kind('fabricinfra') }}"
+  # => 'internal'
+  kind: "{{ 'fabricinfra.svc.cluster.local' | hyperledger.fabric_ansible_collection.fabric_domain_kind('fabricinfra') }}"
+  # => 'invalid'
+  kind: "{{ 'svc.cluster.local' | hyperledger.fabric_ansible_collection.fabric_domain_kind('fabricinfra') }}"
+
+RETURN:
+  _value:
+    description: One of C(external), C(internal) or C(invalid).
+    type: str

@@ -1,0 +1,24 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: "{{ item.name }}"
+  namespace: "{{ k8s_endpoint_services_namespace }}"
+  labels:
+    app.kubernetes.io/managed-by: fabric-ansible-collection
+    fabric-ansible-collection/component: "{{ k8s_endpoint_services_component }}"
+    fabric-ansible-collection/instance: "{{ item.cr_name }}"
+    fabric-ansible-collection/endpoint: "{{ item.endpoint }}"
+spec:
+  type: ClusterIP
+  selector:
+    "{{ k8s_endpoint_services_selector_key }}": "{{ item.cr_name }}"
+  ports:
+    - name: https
+      port: 443
+      # Unquoted: a string targetPort is a named port.
+      targetPort: {{ item.target_port | int }}
+      protocol: TCP

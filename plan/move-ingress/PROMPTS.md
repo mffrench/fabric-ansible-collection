@@ -515,3 +515,22 @@ As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md, a service por
 A few adjustments are needed for it to work end to end. In particular, every endpoint needs its own 443 Service. Each node advertises several endpoints on 443: API, operations, grpcweb, and admin on orderers. With your CoreDNS rewrites, -operations and the other hostnames still resolve to the same Service. There, 443 would reach the API port rather than operations (9443 on peers and CAs, 8443 on orderers), grpcweb (7443) or orderer admin (9443). That would break the console's status checks and grpcweb proxy, the collection's health waits, and joining orderers to channels. A Service port can map 443 to only one target, so this approach requires creating one Service per endpoint type, each with a matching CoreDNS rewrite. That also avoids modifying operator-managed objects.
 
 Fix @plan/move-ingress/MIGRATION-STEP-1.md plan to create one service per endpoint type.
+
+## Fix review step 1 Implementation mistakes part Variables and facts
+
+As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md in Implementation mistakes (fixable without changing the design)
+fix in the code Variables and facts
+
+* remove discovery vua kubectl exec ... awk
+* make sure all relevant roles and playbook have access to the required variables fix incorrect incluse_tasks path and avoir implicit dependeciens between roles
+* Correctly distinguish external domains, Kubernetes Service FQDNs, and internal domains. Keep B3-related rules optional so they do not block Step 1
+
+## Fix review step 1 Implementation mistakes part Organization roles
+
+As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md in Implementation mistakes (fixable without changing the design)
+fix Organization roles
+
+* kubernetes.core tasks in endorsing_organization / ordering_organization only when a component is not exposed (opt-in guard)
+* operator CR names: lower case without non alphanumeric characters, one set of Services per ordering service node
+* register the module outputs instead of the undefined peer_api_url, ca_api_url, orderer_api_url
+* no certificate_authority role: CA tasks go in both organization roles

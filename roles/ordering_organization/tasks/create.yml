@@ -37,6 +37,15 @@
       msg: ordering_service_enrollment_secret not specified or is empty
   when: not ordering_service_enrollment_secret is defined or not ordering_service_enrollment_secret
 
+- name: Create the Services of the certificate authority endpoints
+  include_role:
+      name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
+  vars:
+      k8s_endpoint_services_namespace: "{{ namespace }}"
+      k8s_endpoint_services_component: ca
+      k8s_endpoint_services_names: ["{{ ca_name }}"]
+  when: not expose_ca | bool
+
 - name: Create certificate authority
   hyperledger.fabric_ansible_collection.certificate_authority:
       state: "{{ state }}"
@@ -69,6 +78,20 @@
       version: "{{ ca_version | default(omit) }}"
       zone: "{{ ca_zone | default(omit) }}"
       wait_timeout: "{{ wait_timeout | default(omit) }}"
+  register: ordering_organization_ca
+
+- name: Check the Services of the certificate authority endpoints
+  include_role:
+      name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
+      tasks_from: verify
+  vars:
+      k8s_endpoint_services_namespace: "{{ namespace }}"
+      k8s_endpoint_services_component: ca
+      k8s_endpoint_services_names: ["{{ ca_name }}"]
+      k8s_endpoint_services_urls:
+          - "{{ ordering_organization_ca.certificate_authority.api_url }}"
+          - "{{ ordering_organization_ca.certificate_authority.operations_url }}"
+  when: not expose_ca | bool
 
 - name: Enroll certificate authority admin
   hyperledger.fabric_ansible_collection.enrolled_identity:
@@ -149,6 +172,16 @@
       admins:
           - "{{ ordering_organization_org_admin.enrolled_identity.cert | default(omit) }}"
 
+- name: Create the Services of the ordering service node endpoints
+  include_role:
+      name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
+  vars:
+      k8s_endpoint_services_namespace: "{{ namespace }}"
+      k8s_endpoint_services_component: orderer
+      k8s_endpoint_services_names: ["{{ ordering_service_name }}"]
+      k8s_endpoint_services_orderer_nodes: "{{ ordering_service_nodes }}"
+  when: not expose_orderer | bool
+
 - name: Create ordering service
   hyperledger.fabric_ansible_collection.ordering_service:
       state: "{{ state }}"
@@ -171,3 +204,17 @@
       version: "{{ ordering_service_version | default(omit) }}"
       zones: "{{ ordering_service_zones | default(omit) }}"
       wait_timeout: "{{ wait_timeout | default(omit) }}"
+  register: ordering_organization_ordering_service
+
+- name: Check the Services of the ordering service node endpoints
+  include_role:
+      name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
+      tasks_from: verify
+  vars:
+      _nodes: "{{ ordering_organization_ordering_service.ordering_service }}"
+      k8s_endpoint_services_namespace: "{{ namespace }}"
+      k8s_endpoint_services_component: orderer
+      k8s_endpoint_services_names: ["{{ ordering_service_name }}"]
+      k8s_endpoint_services_orderer_nodes: "{{ ordering_service_nodes }}"
+      k8s_endpoint_services_urls: "{{ (_nodes | map(attribute='api_url') | list) + (_nodes | map(attribute='operations_url') | list) + (_nodes | map(attribute='grpcwp_url') | list) + (_nodes | map(attribute='osnadmin_url') | list) }}"
+  when: not expose_orderer | bool

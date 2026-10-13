@@ -1,0 +1,43 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+- name: Fail if namespace not specified
+  fail:
+    msg: k8s_endpoint_services_namespace not specified or is empty
+  when: not k8s_endpoint_services_namespace
+
+- name: Fail if component not supported
+  fail:
+    msg: >-
+      k8s_endpoint_services_component '{{ k8s_endpoint_services_component }}' is not
+      one of {{ k8s_endpoint_services_endpoints.keys() | list | join(', ') }}
+  when: k8s_endpoint_services_component not in k8s_endpoint_services_endpoints
+
+- name: Determine the custom resource names of the components
+  set_fact:
+    k8s_endpoint_services_cr_names: >-
+      {{ _cr_names | product(range(1, (k8s_endpoint_services_orderer_nodes | int) + 1))
+                   | map('join', k8s_endpoint_services_orderer_node_suffix) | list
+         if k8s_endpoint_services_component == 'orderer' else _cr_names }}
+  vars:
+    _cr_names: >-
+      {{ k8s_endpoint_services_names | map('lower')
+         | map('regex_replace', k8s_endpoint_services_cr_name_regex, '') | list }}
+
+# One Service per component endpoint, named after the first label of the FQDN
+# advertised by the operator: <namespace>-<CR name>-<endpoint>.
+- name: Determine the Services of the component endpoints
+  set_fact:
+    k8s_endpoint_services_services: >-
+      {%- set services = [] -%}
+      {%- for cr_name in k8s_endpoint_services_cr_names -%}
+      {%- for item in k8s_endpoint_services_endpoints[k8s_endpoint_services_component] -%}
+      {%- set _ = services.append({
+            'name': k8s_endpoint_services_namespace ~ '-' ~ cr_name ~ '-' ~ item.endpoint,
+            'cr_name': cr_name,
+            'endpoint': item.endpoint,
+            'target_port': item.target_port | int}) -%}
+      {%- endfor -%}
+      {%- endfor -%}
+      {{ services }}

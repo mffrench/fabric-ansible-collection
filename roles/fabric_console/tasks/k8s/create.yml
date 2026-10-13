@@ -7,6 +7,9 @@
     msg: namespace not specified or is empty
   when: not namespace is defined or not namespace
 
+- name: Check ingress and exposure settings
+  include_tasks: k8s/exposure_checks.yml
+
 - name: Determine if namespace exists
   kubernetes.core.k8s_info:
     api_version: v1

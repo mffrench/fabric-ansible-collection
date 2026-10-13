@@ -1,0 +1,55 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+- name: Fail if ingress type is not supported
+  fail:
+    msg: ingress_type '{{ ingress_type }}' is not supported, it must be "nginx"
+  when: ingress_type not in ("nginx",)
+
+- name: Classify the console domain
+  set_fact:
+    console_domain_kind: "{{ console_domain | hyperledger.fabric_ansible_collection.fabric_domain_kind(namespace, cluster_domain) }}"
+
+- name: Warn if the console domain looks internal but is outside the cluster domain
+  debug:
+    msg: >-
+      console_domain '{{ console_domain }}' looks like a Kubernetes internal domain,
+      but it is not inside cluster_domain '{{ cluster_domain }}', so it is treated as
+      an external domain. If your cluster does not use '{{ cluster_domain }}', set
+      cluster_domain explicitly.
+  when:
+    - console_domain_kind == 'external'
+    - console_domain is search('^[^.]+[.]svc[.]')
+
+- name: Fail if component FQDNs built from the console domain can never resolve
+  fail:
+    msg: >-
+      console_domain '{{ console_domain }}' is inside cluster_domain '{{ cluster_domain }}'
+      but is not '{{ namespace }}.svc.{{ cluster_domain }}', so component FQDNs
+      ('<namespace>-<name>-<role>.{{ console_domain }}') can never resolve.
+      Use an external domain.
+  when: console_domain_kind == 'invalid'
+
+- name: Fail if an internal console domain is used with exposed components
+  fail:
+    msg: >-
+      console_domain '{{ console_domain }}' is an internal domain, so no component
+      can be exposed outside the cluster. Set these flags to false, or use an
+      external domain: {{ exposed_flags | join(', ') }}
+  vars:
+    exposed_flags: "{{ (['expose_console'] if expose_console | bool else []) + (['expose_ca'] if expose_ca | bool else []) + (['expose_peer'] if expose_peer | bool else []) + (['expose_orderer'] if expose_orderer | bool else []) }}"
+  when:
+    - console_domain_kind == 'internal'
+    - exposed_flags | length > 0
+
+# An internal domain needs one collection-owned Service per component FQDN,
+# which this collection does not create yet.
+- name: Fail if an internal console domain is used
+  fail:
+    msg: >-
+      console_domain '{{ console_domain }}' is an internal domain. Component FQDNs
+      built from it only resolve if a Service named '<namespace>-<name>-<role>' exists
+      for each of them, and this collection does not create these Services yet.
+      Use an external domain.
+  when: console_domain_kind == 'internal'

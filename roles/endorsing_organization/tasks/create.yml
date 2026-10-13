@@ -42,6 +42,15 @@
       msg: number of zones does not match the number of peers
   when: peer_zones is defined and (peer_zones | length != peers)
 
+- name: Create the Services of the certificate authority endpoints
+  include_role:
+      name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
+  vars:
+      k8s_endpoint_services_namespace: "{{ namespace }}"
+      k8s_endpoint_services_component: ca
+      k8s_endpoint_services_names: ["{{ ca_name }}"]
+  when: not expose_ca | bool
+
 - name: Create certificate authority
   hyperledger.fabric_ansible_collection.certificate_authority:
       state: "{{ state }}"
@@ -74,6 +83,20 @@
       version: "{{ ca_version | default(omit) }}"
       zone: "{{ ca_zone | default(omit) }}"
       wait_timeout: "{{ wait_timeout | default(omit) }}"
+  register: endorsing_organization_ca
+
+- name: Check the Services of the certificate authority endpoints
+  include_role:
+      name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
+      tasks_from: verify
+  vars:
+      k8s_endpoint_services_namespace: "{{ namespace }}"
+      k8s_endpoint_services_component: ca
+      k8s_endpoint_services_names: ["{{ ca_name }}"]
+      k8s_endpoint_services_urls:
+          - "{{ endorsing_organization_ca.certificate_authority.api_url }}"
+          - "{{ endorsing_organization_ca.certificate_authority.operations_url }}"
+  when: not expose_ca | bool
 
 - name: Enroll certificate authority admin
   hyperledger.fabric_ansible_collection.enrolled_identity:
@@ -154,6 +177,19 @@
       admins:
           - "{{ endorsing_organization_org_admin.enrolled_identity.cert | default(omit) }}"
 
+- name: Determine the peer names
+  set_fact:
+      endorsing_organization_peer_names: "{{ [peer_name] if peers == 1 else [peer_name] | product(range(1, peers + 1)) | map('join') | list }}"
+
+- name: Create the Services of the peer endpoints
+  include_role:
+      name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
+  vars:
+      k8s_endpoint_services_namespace: "{{ namespace }}"
+      k8s_endpoint_services_component: peer
+      k8s_endpoint_services_names: "{{ endorsing_organization_peer_names }}"
+  when: not expose_peer | bool
+
 - name: Create peer
   hyperledger.fabric_ansible_collection.peer:
       state: "{{ state }}"
@@ -176,6 +212,7 @@
       version: "{{ peer_version | default(omit) }}"
       zone: "{{ peer_zones[0] | default(omit) }}"
       wait_timeout: "{{ wait_timeout | default(omit) }}"
+  register: endorsing_organization_peer
   when: peers == 1
 
 - name: Create multiple peers
@@ -203,4 +240,17 @@
   loop: "{{ range(1, peers + 1, 1) | list }}"
   loop_control:
       index_var: peer_idx
+  register: endorsing_organization_peers
   when: peers > 1
+
+- name: Check the Services of the peer endpoints
+  include_role:
+      name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
+      tasks_from: verify
+  vars:
+      _peers: "{{ [endorsing_organization_peer.peer] if peers == 1 else endorsing_organization_peers.results | map(attribute='peer') | list }}"
+      k8s_endpoint_services_namespace: "{{ namespace }}"
+      k8s_endpoint_services_component: peer
+      k8s_endpoint_services_names: "{{ endorsing_organization_peer_names }}"
+      k8s_endpoint_services_urls: "{{ (_peers | map(attribute='api_url') | list) + (_peers | map(attribute='operations_url') | list) + (_peers | map(attribute='grpcwp_url') | list) }}"
+  when: not expose_peer | bool

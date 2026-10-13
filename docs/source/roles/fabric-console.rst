@@ -166,6 +166,36 @@ Parameters
 
     | **Type**: str
 
+  ingress_type
+    The ingress implementation in front of the console and the components it creates. Kubernetes target only.
+
+    Only ``nginx`` is supported.
+
+    | **Type**: str
+    | **Default value**: ``nginx``
+
+  expose_console, expose_ca, expose_peer, expose_orderer
+    Whether the console, certificate authorities, peers and ordering service nodes are meant to be reachable from outside the cluster. Kubernetes target only.
+
+    They must all be ``false`` when *console_domain* is an internal domain.
+
+    | **Type**: bool
+    | **Default value**: ``true``
+
+  cluster_domain
+    The DNS zone served by the cluster DNS (the CoreDNS ``kubernetes`` plugin). Kubernetes target only.
+
+    It is used to classify *console_domain*. It is not discovered: set it if your cluster does not use ``cluster.local``.
+
+    *console_domain* is classified as follows, where *namespace* is the namespace of the console:
+
+    * **external**: outside *cluster_domain*, for example ``example.com``. This is the normal case.
+    * **internal**: exactly ``<namespace>.svc.<cluster_domain>``. Component host names then have the shape of Kubernetes Service names and only resolve if such Services exist. This collection does not create them yet, so an internal domain is rejected.
+    * **invalid**: any other domain inside *cluster_domain*, for example ``svc.cluster.local``. Component host names can never resolve, so the role fails.
+
+    | **Type**: str
+    | **Default value**: ``cluster.local``
+
   console_email (required)
     The email address of the default console user.
 

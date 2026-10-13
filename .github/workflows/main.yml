@@ -40,6 +40,9 @@ jobs:
 
           shellcheck tutorial/*.sh
           yamllint .
+      - name: Run unit tests
+        run: |
+          pytest tests/unit
       - name: Publish collection
         uses: actions/upload-artifact@v4
         with:

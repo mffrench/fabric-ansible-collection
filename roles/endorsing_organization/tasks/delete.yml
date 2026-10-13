@@ -70,3 +70,23 @@
       name: "{{ peer_name }}{{ item }}"
   loop: "{{ range(1, peers + 1, 1) | list }}"
   when: peers > 1
+
+- name: Delete the Services of the certificate authority endpoints
+  include_role:
+      name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
+      tasks_from: delete
+  vars:
+      k8s_endpoint_services_namespace: "{{ namespace }}"
+      k8s_endpoint_services_component: ca
+      k8s_endpoint_services_names: ["{{ ca_name }}"]
+  when: not expose_ca | bool
+
+- name: Delete the Services of the peer endpoints
+  include_role:
+      name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
+      tasks_from: delete
+  vars:
+      k8s_endpoint_services_namespace: "{{ namespace }}"
+      k8s_endpoint_services_component: peer
+      k8s_endpoint_services_names: "{{ [peer_name] if peers == 1 else [peer_name] | product(range(1, peers + 1)) | map('join') | list }}"
+  when: not expose_peer | bool

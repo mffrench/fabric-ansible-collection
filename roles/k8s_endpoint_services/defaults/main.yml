@@ -1,0 +1,53 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# Internal role, called by the organization roles when a component is not
+# exposed (expose_ca, expose_peer or expose_orderer set to false). Kubernetes
+# only: it needs the kubernetes.core collection and a kubeconfig.
+
+# Namespace of the console and of the components it creates. Required.
+k8s_endpoint_services_namespace: ""
+
+# Kind of component: ca, peer or orderer.
+k8s_endpoint_services_component: ""
+
+# Console display names of the components: the CA name, the peer names, or the
+# ordering service name.
+k8s_endpoint_services_names: []
+
+# Ordering service only: number of ordering service nodes.
+k8s_endpoint_services_orderer_nodes: 1
+
+# The console names each operator custom resource after the display name, in
+# lower case, without the characters matching this expression
+# ("Org1 CA" -> "org1ca").
+k8s_endpoint_services_cr_name_regex: "[^a-z0-9]"
+
+# Ordering service nodes are named <ordering service CR name><suffix><n>
+# ("Ordering Service", 3 nodes -> orderingservicenode1 .. orderingservicenode3).
+k8s_endpoint_services_orderer_node_suffix: node
+
+# Pod label holding the custom resource name, as used by the selector of the
+# operator's own Services (app: <CR name>).
+k8s_endpoint_services_selector_key: app
+
+# Endpoint types per component and the container port each one maps to. The
+# operator advertises every endpoint as <namespace>-<CR name>-<endpoint>.<domain>:443.
+k8s_endpoint_services_endpoints:
+  ca:
+    - {endpoint: ca, target_port: 7054}
+    - {endpoint: operations, target_port: 9443}
+  peer:
+    - {endpoint: peer, target_port: 7051}
+    - {endpoint: operations, target_port: 9443}
+    - {endpoint: grpcweb, target_port: 7443}
+  orderer:
+    - {endpoint: orderer, target_port: 7050}
+    - {endpoint: admin, target_port: 9443}
+    - {endpoint: operations, target_port: 8443}
+    - {endpoint: grpcweb, target_port: 7443}
+
+# tasks_from: verify only. URLs reported by the console for the components
+# (api_url, operations_url, grpcwp_url, osnadmin_url). Empty values are ignored.
+k8s_endpoint_services_urls: []

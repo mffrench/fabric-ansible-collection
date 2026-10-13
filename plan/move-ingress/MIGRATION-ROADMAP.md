@@ -101,8 +101,8 @@ the `gateway-api` leg), remaining W7 (organization tutorials and migration guide
 
 **Key outcomes:**
 - All `TLSRoute` and optional `HTTPRoute` templates and post-tasks are
-  implemented in `certificate_authority`, `endorsing_organization`, and
-  `ordering_organization` roles.
+  implemented in the `endorsing_organization` and `ordering_organization` roles
+  (the CA is created by the `certificate_authority` module inside both roles).
 - `api_url` for peers resolves to `:7051`; for orderers to `:7050`; CA uses
   TLS passthrough on `:7054`.
 - CI Scenario B (all services externally exposed) passes on the `gateway-api` leg

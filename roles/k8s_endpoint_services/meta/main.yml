@@ -1,0 +1,14 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+galaxy_info:
+  author: Hyperledger Fabric Ansible Collection contributors
+  description: Internal role creating one ClusterIP Service per endpoint of the Fabric components that are not exposed through the ingress
+  license: Apache-2.0
+  platforms:
+    - name: GenericLinux
+      versions:
+        - all
+  galaxy_tags: []
+  min_ansible_version: "2.9"

@@ -43,6 +43,8 @@ fabric_orderer_image: "{{ orderer_image }}:{{ orderer_image_label }}"
 fabric_tools_image: "{{ tools_image }}:{{ tools_image_label }}"
 
 # test_network_ingress_ipaddr: "172.17.154.105"
+# Deprecated and unused: no task or template reads it. Component FQDNs are built
+# by the operator from the console domain (console_domain in the console roles).
 ingress_domain: localho.st
 container_cli: docker
 container_namespace: ""

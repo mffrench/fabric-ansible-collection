@@ -32,6 +32,21 @@ console: ibm-hlfsupport-console
 console_storage_class: default
 console_storage_size: 10Gi
 
+# Ingress and exposure settings (Kubernetes target only).
+# ingress_type: the ingress implementation in front of the components.
+# Only "nginx" is supported for now.
+ingress_type: nginx
+# expose_*: whether the component is meant to be reachable from outside the cluster.
+# They must all be false when console_domain is an internal domain
+# (<namespace>.svc.<cluster_domain>).
+expose_console: true
+expose_ca: true
+expose_peer: true
+expose_orderer: true
+# cluster_domain: the DNS zone served by the cluster DNS (the CoreDNS "kubernetes"
+# plugin). It is not discovered: set it if your cluster does not use cluster.local.
+cluster_domain: cluster.local
+
 wait_timeout: 60
 product_version: "1.0.5"
 operator_version: "20230418"
