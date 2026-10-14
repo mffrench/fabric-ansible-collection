@@ -515,3 +515,9 @@ As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md, a service por
 A few adjustments are needed for it to work end to end. In particular, every endpoint needs its own 443 Service. Each node advertises several endpoints on 443: API, operations, grpcweb, and admin on orderers. With your CoreDNS rewrites, -operations and the other hostnames still resolve to the same Service. There, 443 would reach the API port rather than operations (9443 on peers and CAs, 8443 on orderers), grpcweb (7443) or orderer admin (9443). That would break the console's status checks and grpcweb proxy, the collection's health waits, and joining orderers to channels. A Service port can map 443 to only one target, so this approach requires creating one Service per endpoint type, each with a matching CoreDNS rewrite. That also avoids modifying operator-managed objects.
 
 Fix @plan/move-ingress/MIGRATION-STEP-1.md plan to create one service per endpoint type.
+
+## Fix step1 implementation mistakes
+
+As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md, the Implementation mistakes variables and facts, organization roles, console, expose-none CI.
+
+Fix @plan/move-ingress/MIGRATION-STEP-1.md plan to handle those warnings

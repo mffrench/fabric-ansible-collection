@@ -18,342 +18,206 @@ The primary goals of this step are:
    through the NGINX ingress controller (`expose_console: false`,
    `expose_ca: false`, `expose_peer: false`, `expose_orderer: false`).
 
+**Domain.** In this plan, *the domain* is `console_domain`: the operator builds
+every component hostname as `<namespace>-<cr name>-<endpoint>.<console_domain>`.
+`INGRESS_DOMAIN` in the CI scripts is the same value.
+
 ---
 
-## Sub-task 1.1 — Variable abstraction (`fabric_operator_crds` defaults)
+## Sub-task 1.1 — Variable abstraction (defaults in each role that reads them)
 
-**Intent:** Introduce every new variable with safe defaults so all existing
-playbooks continue to work without modification. This sub-task also introduces
-two new variables — `ingress_domain` and `cluster_domain` — and a derived fact
-`ingress_domain_is_cluster_local` that later sub-tasks (1.1b, 1.4b) use to
-decide whether CoreDNS rewrites are needed. The per-endpoint Services of
-sub-task 1.3b are needed in **both** cases.
+**Intent:** Introduce the new variables with safe defaults so all existing
+playbooks keep working unchanged. A role cannot see the defaults of another
+role, and the roles are used from separate playbooks, so **each role declares
+the variables it reads in its own `defaults/main.yml`**, with identical default
+values. Nothing is discovered from the cluster: `cluster_domain` is a
+documented default to override, not an auto-discovered fact.
 
 **Expected outcomes:**
-- `roles/fabric_operator_crds/defaults/main.yml` contains `ingress_type: nginx`,
-  the six `expose_*` flags, the three port variables, `gateway_class_name`,
-  `ingress_domain`, and `cluster_domain`.
-- A new task file `roles/fabric_operator_crds/tasks/k8s/set_facts.yml` attempts
-  to auto-discover the real cluster domain from a running pod; falls back to the
-  user-supplied `cluster_domain` value with a warning if discovery fails; errors
-  if the discovered value contradicts a user-supplied non-default value.
-- `ansible-lint` and `yamllint` pass on all modified files.
+- `roles/fabric_console/defaults/main.yml` and
+  `roles/hlfsupport_console/defaults/main.yml` declare `ingress_type: nginx`,
+  `expose_console`, `expose_ca`, `expose_peer`, `expose_orderer` (all `true`) and
+  `cluster_domain: cluster.local`.
+- `roles/endorsing_organization` declares `expose_ca`, `expose_peer` and
+  `namespace`; `roles/ordering_organization` declares `expose_ca`,
+  `expose_orderer` and `namespace` (used by sub-task 1.3b).
+- `tests/unit/test_role_defaults_consistency.py` fails when a shared variable has
+  different defaults in two roles, or when a role reads a shared variable it does
+  not declare.
+- `ingress_domain` in `fabric_operator_crds` is read by no task or template: it
+  stays declared and is marked deprecated. The component hostnames come from
+  `console_domain` (see the Overview).
 - All existing tests pass without setting any new variable.
 
-**New variables:**
+**Variables** (same defaults in every role that declares them):
 
-`ingress_domain` — the DNS domain suffix used when constructing component
-hostnames (e.g. `localho.st`, `example.com`). The operator templates component
-FQDNs as `<namespace>-<slug>-<role>.<ingress_domain>`. Default: `localho.st`.
+| Variable | Default | Meaning |
+|---|---|---|
+| `ingress_type` | `nginx` | Ingress implementation. Only `nginx` is accepted (1.1b). |
+| `expose_console`, `expose_ca`, `expose_peer`, `expose_orderer` | `true` | Whether the component is meant to be reachable through the ingress. |
+| `cluster_domain` | `cluster.local` | DNS zone served by the cluster DNS. Override it when the cluster uses another zone. |
+| `namespace` | `""` | Namespace of the console and its components. Required by the organization roles only when a component is not exposed. |
 
-`cluster_domain` — the Kubernetes cluster search domain (e.g. `cluster.local`).
-Used by sub-task 1.1b to detect cluster-local deployments and by sub-task 1.4b
-as a literal value in CoreDNS rewrite target FQDNs
-(`<svc>.<namespace>.svc.<cluster_domain>`). Default: `cluster.local`.
-
-**Auto-discovery of `cluster_domain`:**
-
-The true cluster domain is read at role entry from the `resolv.conf` of the
-CoreDNS deployment. Every pod's `/etc/resolv.conf` contains a `search` line:
-
-```
-search <namespace>.svc.<domain> svc.<domain> <domain>
-```
-
-The fourth `awk` field (`$4`, where `$1` is the literal word `search`) is the
-bare cluster domain. A dedicated task file performs the discovery and reconciles
-it with the user-supplied default:
-
-```yaml
-# roles/fabric_operator_crds/tasks/k8s/set_facts.yml
-
-- name: Attempt to discover cluster domain from CoreDNS pod resolv.conf
-  ansible.builtin.command:
-    argv:
-      - kubectl
-      - exec
-      - -n
-      - kube-system
-      - deployment/coredns
-      - --
-      - awk
-      - /^search/{print $4}
-      - /etc/resolv.conf
-  register: _discovered_domain
-  changed_when: false
-  failed_when: false   # discovery failure is handled below, not here
-
-- name: Warn and keep user-supplied cluster_domain when discovery fails
-  ansible.builtin.debug:
-    msg: >-
-      WARNING: could not auto-discover the cluster domain
-      (kubectl exec failed: {{ _discovered_domain.stderr | default('') }}).
-      Using cluster_domain='{{ cluster_domain }}' as supplied.
-      If this value is wrong, set cluster_domain explicitly in your vars file.
-  when: _discovered_domain.rc != 0 or (_discovered_domain.stdout | trim) == ''
-
-- name: Fail if discovered cluster domain contradicts user-supplied value
-  ansible.builtin.fail:
-    msg: >-
-      The cluster domain auto-discovered from the cluster
-      ('{{ _discovered_domain.stdout | trim }}') does not match the
-      cluster_domain variable you set ('{{ cluster_domain }}').
-      Either remove cluster_domain from your vars file to accept the
-      auto-discovered value, or correct it to
-      '{{ _discovered_domain.stdout | trim }}'.
-  when:
-    - _discovered_domain.rc == 0
-    - (_discovered_domain.stdout | trim) != ''
-    - cluster_domain != 'cluster.local'            # user overrode the default
-    - cluster_domain != (_discovered_domain.stdout | trim)
-
-- name: Override cluster_domain with auto-discovered value
-  ansible.builtin.set_fact:
-    cluster_domain: "{{ _discovered_domain.stdout | trim }}"
-  when:
-    - _discovered_domain.rc == 0
-    - (_discovered_domain.stdout | trim) != ''
-
-# Only <namespace>.svc.<cluster_domain> is a usable cluster-local domain: the
-# FQDN <ns>-<cr>-<endpoint>.<ns>.svc.<cluster_domain> is then exactly the FQDN
-# of the per-endpoint Service created by sub-task 1.3b.
-- name: Set ingress_domain_is_cluster_local fact
-  ansible.builtin.set_fact:
-    ingress_domain_is_cluster_local: >-
-      {{ ingress_domain == k8s_namespace + '.svc.' + cluster_domain }}
-    ingress_domain_is_unsupported_cluster_local: >-
-      {{ ingress_domain != k8s_namespace + '.svc.' + cluster_domain
-         and (ingress_domain == cluster_domain
-              or ingress_domain.endswith('.' + cluster_domain)) }}
-```
+**Not added in this step:** `expose_peer_operations`, `expose_orderer_operations`,
+`expose_grpcweb`, `gateway_class_name`, `ingress_ca_port`,
+`ingress_grpc_orderer_port` and `ingress_grpc_peer_port`. No task reads them in
+Step 1; the step that reads each one (Steps 2 and 3) declares it in the roles
+that use it, and extends the consistency test.
 
 **Todo list:**
-- [ ] Add `ingress_type: nginx` to
-  `roles/fabric_operator_crds/defaults/main.yml`.
-- [ ] Add `expose_console: true`, `expose_ca: true`, `expose_peer: true`,
-  `expose_orderer: true`, `expose_peer_operations: false`,
-  `expose_orderer_operations: false`, `expose_grpcweb: false`.
-- [ ] Add `gateway_class_name: fabric-envoy-gateway`,
-  `ingress_ca_port: 7054`, `ingress_grpc_orderer_port: 7050`,
-  `ingress_grpc_peer_port: 7051` (consumed in later steps; inert here).
-- [ ] Add the following two new variables with inline comments:
-  ```yaml
-  # DNS domain suffix used to construct component hostnames.
-  # Examples: localho.st (local dev), example.com (production).
-  # Set to <namespace>.svc.<cluster_domain> (e.g. fabricinfra.svc.cluster.local)
-  # when all components stay in-cluster and all expose_* are false: component
-  # FQDNs are then the names of the per-endpoint Services (sub-task 1.3b) and
-  # CoreDNS rewrites are unnecessary. Any other *.<cluster_domain> value, or
-  # mixing a cluster-local ingress_domain with any expose_*: true, is an error
-  # (caught at role entry by sub-task 1.1b).
-  ingress_domain: localho.st
-
-  # Kubernetes cluster search domain.  The role attempts to auto-discover this
-  # at runtime from a CoreDNS pod's /etc/resolv.conf.  If discovery succeeds
-  # this default is silently overridden; if it fails this value is used and a
-  # warning is printed.  Override explicitly when the auto-discovery cannot run
-  # (e.g. no running pods yet) or when your cluster uses a non-standard domain.
-  cluster_domain: cluster.local
-  ```
-- [ ] Create `roles/fabric_operator_crds/tasks/k8s/set_facts.yml` with the five
-  tasks shown above (discover, warn-on-failure, conflict-error, override,
-  set `ingress_domain_is_cluster_local`).
-- [ ] Include `set_facts.yml` at the top of
-  `roles/fabric_operator_crds/tasks/k8s/create.yml` and the equivalent
-  `create.yml` in `roles/hlfsupport_console`, before any task that branches on
-  `expose_*` or `ingress_domain_is_cluster_local`:
-  ```yaml
-  - ansible.builtin.include_tasks: set_facts.yml
-  ```
-- [ ] Add inline comments explaining every variable's purpose and when to
-  override it, as specified in MIGRATION-PLAN.md §5.1.
+- [ ] Declare `ingress_type`, the four `expose_*` and `cluster_domain` in the
+  defaults of `fabric_console` and `hlfsupport_console`.
+- [ ] Declare `expose_*` and `namespace` in the defaults of
+  `endorsing_organization` and `ordering_organization`.
+- [ ] Mark `ingress_domain` of `fabric_operator_crds` as deprecated and unused.
+- [ ] Add `tests/unit/test_role_defaults_consistency.py` and run `pytest
+  tests/unit` in `.github/workflows/main.yml`.
+- [ ] Document the variables in `docs/source/roles/` for the four roles.
 - [ ] Run `ansible-lint` and `yamllint` on all modified and new files.
 
 **Relevant context:**
-- The defaults file must not contain conditional logic — only `key: value`
-  defaults. All conditional logic lives in `set_facts.yml`.
-- `awk` field `$4` (not `$3`) is the bare cluster domain because `$1` is the
-  literal word `search` and the standard three search entries are
-  `<ns>.svc.<domain>`, `svc.<domain>`, `<domain>`.
-- The conflict-error guard uses `cluster_domain != 'cluster.local'` to
-  distinguish "user explicitly set a value" from "user left the default".
-  An alternative is to use a sentinel default (e.g. `cluster_domain: ""`) so
-  any non-empty user value is treated as explicit; choose whichever makes the
-  Ansible logic cleaner.
-- `ingress_domain_is_cluster_local` is consumed by sub-tasks 1.1b and 1.4b;
-  `ingress_domain_is_unsupported_cluster_local` by sub-task 1.1b only.
-  Sub-task 1.3b runs regardless of either fact.
-- The `kubectl exec` requires a valid kubeconfig on the Ansible control node —
-  already a prerequisite for all other collection tasks.
+- The defaults files contain only `key: value` pairs. The checks that use them
+  live in `exposure_checks.yml` (sub-task 1.1b).
+- Why `cluster_domain` is not discovered: `kubectl exec … awk` cannot work on
+  the CoreDNS image (distroless, `dnsPolicy: Default`, no cluster `search` line)
+  and needs `pods/exec`. Almost every cluster uses `cluster.local`, so a
+  documented default is enough.
+- Why the variables are repeated: separate playbooks cannot share a role's
+  defaults. The unit test keeps the copies identical.
 
 ---
 
-## Sub-task 1.1b — Cluster-local domain validation guard
+## Sub-task 1.1b — Domain classification and exposure checks
 
-**Intent:** When `ingress_domain` is a cluster-local suffix (detected by
-`ingress_domain_is_cluster_local: true` from sub-task 1.1, i.e.
-`ingress_domain == <namespace>.svc.<cluster_domain>`), every component FQDN
-`<ns>-<cr>-<endpoint>.<ns>.svc.<cluster_domain>` is exactly the FQDN of the
-per-endpoint Service created by sub-task 1.3b. CoreDNS resolves them without
-any rewrite rule, and no Ingress object is needed or meaningful. The
-following cases must be enforced at role-entry time:
+**Intent:** The operator builds every component hostname as
+`<namespace>-<cr name>-<endpoint>.<console_domain>`. Depending on the domain,
+those hostnames mean different things, and the console roles must refuse the
+configurations that can never work, at role entry:
 
-| `ingress_domain` | any `expose_*: true` | Action |
+| `console_domain` | Class | Action |
 |---|---|---|
-| `<namespace>.svc.<cluster_domain>` | no (all `false`) | Create per-endpoint Services (1.3b); skip CoreDNS rewrites (1.4b) |
-| `<namespace>.svc.<cluster_domain>` | yes (at least one) | **Fail fast** with an actionable error message |
-| any other `*.<cluster_domain>` (e.g. `svc.cluster.local`, `other-ns.svc.cluster.local`) | any | **Fail fast**: such FQDNs match no Service name |
-| external (e.g. `localho.st`) | any | Normal path; no change |
+| outside `cluster_domain` (`localho.st`, `example.com`, `<ip>.nip.io`) | `external` | Normal path, no change. |
+| exactly `<namespace>.svc.<cluster_domain>` | `internal` | Hostnames have the shape of Service FQDNs (`<svc>.<ns>.svc.<zone>`) and resolve **only if** a Service named `<namespace>-<cr name>-<endpoint>` exists (sub-task 1.3b). Optional feature: rejected for now (see below). |
+| any other domain inside `cluster_domain` (`svc.cluster.local`, `other-ns.svc.cluster.local`, `cluster.local`) | `invalid` | Fail: such hostnames match no Service name. |
 
 **Expected outcomes:**
-- When `ingress_domain` is `<namespace>.svc.<cluster_domain>` and all
-  `expose_*` are `false`, the play continues without error, sub-task 1.3b
-  creates the per-endpoint Services, and sub-task 1.4b is skipped.
-- When `ingress_domain` is any other cluster-local value, the play fails
-  immediately and the error names the only supported form.
-- When `ingress_domain` is cluster-local and any `expose_*` is `true`, the play
-  fails immediately with a clear message naming which flags are in conflict.
-- The guard is a no-op for all standard (non-cluster-local) `ingress_domain`
-  values.
+- `plugins/filter/fabric_domain.py` provides the filter
+  `fabric_domain_kind(namespace, cluster_domain)` returning `external`,
+  `internal` or `invalid` (case and trailing dot ignored), covered by unit tests.
+- `roles/fabric_console/tasks/k8s/exposure_checks.yml` and
+  `roles/hlfsupport_console/tasks/k8s/exposure_checks.yml` (identical files, one
+  per role) run at the top of each role's `tasks/k8s/create.yml`, in this order:
+  1. fail if `ingress_type` is not `nginx`;
+  2. classify `console_domain`;
+  3. warn if the domain looks internal (`<x>.svc.…`) but is outside
+     `cluster_domain`, so it is treated as external (the cluster may use another
+     zone: set `cluster_domain`);
+  4. fail if the class is `invalid`;
+  5. fail if the class is `internal` while some `expose_*` is `true`, naming the
+     conflicting flags;
+  6. fail if the class is `internal` (rule 6, see below).
+- `tutorial/00-deploy-fabric-console.yml`, which creates the console inline,
+  runs the same checks in a `pre_tasks` through `include_role … tasks_from`.
+- The checks are a no-op for external domains.
 
-**Concrete task YAML** — add to `set_facts.yml` (or a dedicated guard block
-included immediately after `set_facts.yml` in each role's `create.yml`):
-
-```yaml
-- name: Fail when ingress_domain is a cluster-local value other than <ns>.svc.<cluster_domain>
-  ansible.builtin.fail:
-    msg: >-
-      ingress_domain='{{ ingress_domain }}' is inside the cluster domain
-      '{{ cluster_domain }}' but component FQDNs built from it match no
-      Kubernetes Service. The only supported cluster-local value is
-      '{{ k8s_namespace }}.svc.{{ cluster_domain }}'.
-  when: ingress_domain_is_unsupported_cluster_local | bool
-
-- name: Collect expose_* flags that are true (for error reporting)
-  ansible.builtin.set_fact:
-    _expose_flags_enabled: >-
-      {{
-        (['expose_console'] if expose_console | bool else [])
-        + (['expose_ca']      if expose_ca      | bool else [])
-        + (['expose_peer']    if expose_peer     | bool else [])
-        + (['expose_orderer'] if expose_orderer  | bool else [])
-      }}
-  when: ingress_domain_is_cluster_local | bool
-
-- name: Fail when cluster-local ingress_domain is combined with expose_* flags
-  ansible.builtin.fail:
-    msg: >-
-      ingress_domain='{{ ingress_domain }}' is a cluster-local domain
-      (cluster_domain='{{ cluster_domain }}'), which means no external Ingress
-      will be created. The following expose_* flags are set to true, which is
-      incompatible with a cluster-local ingress_domain:
-        {{ _expose_flags_enabled | join(', ') }}
-      Either set all expose_* flags to false, or use an external ingress_domain
-      (e.g. localho.st, example.com).
-  when:
-    - ingress_domain_is_cluster_local | bool
-    - _expose_flags_enabled | length > 0
-```
+**Why rule 6 exists.** The review marks the internal domain as optional, not
+blocking: `<ns>.svc.<zone>` hostnames only resolve if the collection creates the
+matching Services, and sub-task 1.3b creates them for the CA, the peers and the
+ordering service nodes only. The console hostname
+(`<ns>-<console>-console.<domain>`) has no such Service. Until that is settled,
+an internal domain is rejected with an explicit message instead of failing later
+with a DNS error.
 
 **Todo list:**
-- [ ] Append the three tasks above to
-  `roles/fabric_operator_crds/tasks/k8s/set_facts.yml` (after the
-  `ingress_domain_is_cluster_local` fact-setting task from sub-task 1.1).
-- [ ] Verify the same guard applies in `roles/hlfsupport_console` — since both
-  roles include `set_facts.yml`, no duplicate code is needed.
-- [ ] Write a unit test (using `ansible-playbook --check` or `molecule`) that:
-  - passes with `ingress_domain: <ns>.svc.cluster.local` + all `expose_*: false`
-  - fails with `ingress_domain: <ns>.svc.cluster.local` + `expose_console: true`
-  - fails with `ingress_domain: svc.cluster.local` (any `expose_*`)
-  - passes with `ingress_domain: localho.st` + any `expose_*` combination
-- [ ] Run `ansible-lint` on the updated `set_facts.yml`.
+- [ ] Add the filter, its documentation file and its unit tests.
+- [ ] Add `exposure_checks.yml` to both console roles and include it from their
+  `create.yml`.
+- [ ] Run the checks from `tutorial/00-deploy-fabric-console.yml`.
+- [ ] Run the six cases against the real role (`svc.cluster.local`,
+  `<ns>.svc.cluster.local` with exposed flags, with all flags `false`, another
+  zone, an external domain, `ingress_type: gateway-api`).
+- [ ] Optional, after 1.3b is verified end to end: lift rule 6 for an internal
+  domain with all `expose_*: false`, and decide how the console hostname
+  resolves (Service for the console, or the console excluded).
 
 **Relevant context:**
-- `_expose_flags_enabled` is a local helper fact used only for the error message;
-  it is intentionally not reused elsewhere.
-- `expose_peer_operations`, `expose_orderer_operations`, and `expose_grpcweb`
-  are omitted from the check because they are sub-flags of `expose_peer` /
-  `expose_orderer` — if those parent flags are `false`, the sub-flags are
-  irrelevant; if the parent flags are `true`, the parent-flag check fires first.
-- Sub-task 1.4b skips its CoreDNS rewrites when the domain is cluster-local;
-  sub-task 1.3b does **not** skip (its Services are what makes cluster-local
-  FQDNs resolvable). This sub-task only handles the hard-error cases.
+- Sub-task 1.3b creates its Services whenever a component is not exposed, with
+  any class of domain. Sub-task 1.4b skips its CoreDNS rewrites for an internal
+  domain (the hostnames already are Service FQDNs); that branch is not reachable
+  while rule 6 is active.
+- `expose_peer_operations`, `expose_orderer_operations` and `expose_grpcweb` are
+  not checked: they are not declared in this step (sub-task 1.1).
 
 ---
 
-## Sub-task 1.2 — RBAC extension
+## Sub-task 1.2 — RBAC extension (dropped from Step 1)
 
-**Intent:** Add `gateway.networking.k8s.io` resource permissions to both cluster
-role templates. This is additive and harmless when Gateway API CRDs are not
-installed; applying it now avoids a diff in Step 2.
-
-**Expected outcomes:**
-- Both cluster role templates include the `gateway.networking.k8s.io` rule block.
-- Existing integration tests still pass (the new rules are never exercised on
-  the nginx path).
-- `yamllint` passes on both modified files.
+**Decision:** removed. The `gateway.networking.k8s.io` rules were meant for the
+operator's ClusterRole, but the Gateway API routes are created by Ansible tasks
+(W6), with the permissions of the kubeconfig of the user running them, not by the
+operator. Extending the operator's ClusterRole is unnecessary, and it would also
+break the acceptance criterion that no Gateway API resource appears before
+Step 2.
 
 **Todo list:**
-- [ ] Add the `gateway.networking.k8s.io` rule block to
-  `roles/fabric_operator_crds/templates/k8s/rbac/hlf-operator-clusterrole.yaml`
-  after the existing `networking.k8s.io` block.
-- [ ] Add the same rule block to
-  `roles/hlfsupport_console/templates/k8s/cluster_role.yml.j2`.
-- [ ] Verify the rule block covers `gateways`, `gatewayclasses`, `httproutes`,
-  `tlsroutes`, and `referencegrants` with the verbs listed in
-  MIGRATION-PLAN.md §5.4.
-- [ ] Run `yamllint` on both modified templates.
-
-**Relevant context:**
-- Full rule block content: MIGRATION-PLAN.md §5.4
-- Files: `roles/fabric_operator_crds/templates/k8s/rbac/hlf-operator-clusterrole.yaml`
-  and `roles/hlfsupport_console/templates/k8s/cluster_role.yml.j2`
+- [ ] Remove W4 from the workstreams of Step 1 in `MIGRATION-ROADMAP.md`,
+  `MIGRATION-PLAN.md` and `MIGRATION-STEP-2.md` (which says W4 is "already done
+  in Step 1"), or move it to the step that needs it, if one does.
 
 ---
 
-## Sub-task 1.3 — Console wait-logic for `expose_console` flag
+## Sub-task 1.3 — Console wait logic for the `expose_console` flag
 
-**Intent:** Split the existing monolithic console-wait block into
-`expose_console: true` and `expose_console: false` branches. When
-`expose_console: false` the collection skips route/ingress discovery, polls the
-in-cluster ClusterIP Service URL directly, and prints an informational notice
-instead of a public URL.
+**Intent:** When `expose_console: false`, do not wait for the console Ingress
+and do not look for a public URL: the readiness of the console Deployment is the
+health check, and a notice is printed instead of the URL. The wait runs through
+the Kubernetes API (`k8s_info`), because a `uri` call from the Ansible control
+node cannot resolve in-cluster names.
+
+**Where the waits are today:**
+
+| File | Waits for | What to change |
+|---|---|---|
+| `roles/hlfsupport_console/tasks/k8s/create.yml` | Deployment, then **Ingress** (exists, URL, `uri` 200), then prints the URL | Split the Ingress part on `expose_console`. |
+| `roles/fabric_console/tasks/k8s/create.yml` | Deployment only, then prints the URL | Nothing to split: only the final print changes. |
+| `tutorial/00-deploy-fabric-console.yml` (the playbook CI runs; it does not use the role) | Deployment only, then prints the URL | Same final print, otherwise this sub-task is not tested in CI. |
+
+**Facts about the console Service** (checked on a `fabric-operator` 1.0.9
+cluster): `https://<console Service>.<ns>.svc.<cluster_domain>:3000` answers on
+**HTTPS** (HTTP gets no answer); `/` and `/health` return 200 without
+authentication; `/ak/api/v3/health` returns 401. The health path is therefore
+`/health`, over HTTPS, consistently in every step.
 
 **Expected outcomes:**
-- `roles/hlfsupport_console/tasks/k8s/create.yml` and
-  `roles/fabric_console/tasks/k8s/create.yml` handle `expose_console: false`
-  correctly on the nginx path.
-- When `expose_console: true` (the default) the existing behaviour is preserved.
-- When `expose_console: false` the in-cluster URL
-  `http://{{ console }}.{{ namespace }}.svc.cluster.local:3000` is used for the
-  health-check and a notice is printed.
+- `expose_console: true` (default): existing behaviour, unchanged.
+- `expose_console: false`: no Ingress wait, no `uri` call; the role ends once the
+  Deployment is ready ("Wait for console deployment to start", already present)
+  and prints a notice stating that the console is not exposed and giving its
+  in-cluster URL, built from `cluster_domain` (never a literal `cluster.local`).
+
+**Tasks to add** (`hlfsupport_console`: the four Ingress tasks get
+`when: expose_console | bool`; `fabric_console` and the tutorial: the print
+tasks):
+1. *Wait for console ingress to exist* — `when: expose_console | bool`
+2. *Set console URL from console ingress* — `when: expose_console | bool`
+3. *Wait for console ingress to start* (`uri`, public URL) — `when: expose_console | bool`
+4. *Print console URL* — `when: expose_console | bool`
+5. *Print console exposition notice* — `when: not expose_console | bool`
+
+No `ingress_type == 'gateway-api'` branch: that belongs to Step 2.
 
 **Todo list:**
-- [ ] In `roles/hlfsupport_console/tasks/k8s/create.yml`, locate the existing
-  three tasks: "Wait for console Ingress to exist", "Set console URL", and
-  "Wait for console to respond".
-- [ ] Replace them with the five-task conditional block from
-  MIGRATION-PLAN.md §5.5:
-  - Nginx `Wait for console Ingress` guarded by
-    `ingress_type == 'nginx' and expose_console | bool`.
-  - Nginx `Set console URL from Ingress` with same guard.
-  - `Wait for console to respond (in-cluster Service URL)` guarded by
-    `not expose_console | bool`.
-  - `Wait for console to respond (public URL)` guarded by
-    `expose_console | bool`.
-  - `Print console URL` guarded by `expose_console | bool`.
-  - `Print console exposition notice` guarded by `not expose_console | bool`.
-- [ ] Apply the same pattern to
-  `roles/fabric_console/tasks/k8s/create.yml` (line 57 area).
-- [ ] Do **not** add any Gateway API (`ingress_type == 'gateway-api'`) branches
-  yet — those belong in Step 2.
-- [ ] Run `ansible-lint` on both modified task files.
+- [ ] Apply the five tasks above in `roles/hlfsupport_console/tasks/k8s/create.yml`.
+- [ ] Apply tasks 4 and 5 in `roles/fabric_console/tasks/k8s/create.yml`.
+- [ ] Apply tasks 4 and 5 in `tutorial/00-deploy-fabric-console.yml`.
+- [ ] Check the `apiVersion` of `IBPConsole`: the roles read it as
+  `ibp.com/v1alpha2` (`k8s_info`) but the templates create `ibp.com/v1beta1`.
+  Use one version served by the CRD in both.
+- [ ] Run `ansible-lint` on the modified files.
 
 **Relevant context:**
-- Full task YAML for all five tasks: MIGRATION-PLAN.md §5.5
-- Note: the Gateway API `Wait for console HTTPRoute` tasks should be
-  **omitted** from this step; add them as `when: false` stubs is unnecessary.
-- In-cluster Service URL pattern: `http://{{ console }}.{{ namespace }}.svc.cluster.local:3000`
+- The in-cluster console URL is used by things running **inside** the cluster
+  (the Job of 1.5, the assertion 2 of 1.6), never by the control node.
 
 ---
 
@@ -394,7 +258,7 @@ operator reconciliation cannot revert anything.
 | Orderer | `grpcweb`    | `grpcwp_url`     | 443 | 7443 |
 
 **Naming rule.** The operator builds each FQDN as
-`<namespace>-<cr_name>-<endpoint>.<ingress_domain>`. The collection names
+`<namespace>-<cr_name>-<endpoint>.<console_domain>`. The collection names
 each Service after the **first DNS label** of that FQDN:
 
 ```
@@ -404,13 +268,13 @@ Service FQDN:  <namespace>-<cr_name>-<endpoint>.<namespace>.svc.<cluster_domain>
 
 As a result:
 - CoreDNS needs **one** regex rewrite per endpoint type
-  (`<ns>-*-<endpoint>.<ingress_domain>` → `<same label>.<ns>.svc.<cluster_domain>`),
+  (`<ns>-*-<endpoint>.<console_domain>` → `<same label>.<ns>.svc.<cluster_domain>`),
   not one rule per node. The rules can be written before any node exists,
   which matters because each create module polls `operations_url/healthz`
   **inside** its own task (see `wait_for()` in
   `plugins/module_utils/ordering_services.py`). The Service and the rewrite
   must therefore exist before the module call returns.
-- With `ingress_domain: <namespace>.svc.<cluster_domain>` (sub-task 1.1b), the
+- With `console_domain: <namespace>.svc.<cluster_domain>` (sub-task 1.1b), the
   operator's FQDNs **are** these Service FQDNs: no rewrite at all.
 - Each Service name is a valid DNS-1035 label (≤ 63 chars, starts with a
   letter) because it is also the first label of an FQDN the operator already
@@ -425,217 +289,79 @@ module returns, a verification task checks every URL the console reports
 of created Services. This catches a missing endpoint type that the health
 wait does not exercise (grpcweb, admin).
 
-**Facts to confirm in the operator spike** (REVIEW §Recommended order,
-action 3). They are encoded as role defaults so that a wrong guess means a
-default change, not a redesign:
+**Operator facts** (REVIEW §Recommended order, action 3). Checked on a
+`fabric-operator` 1.0.9 cluster (CA `sinecoca`, peers `sinecopeer1..2`, an
+ordering service of 3 nodes). They are role defaults, so a different operator
+means a default change, not a redesign:
 
-| # | Assumption | Default encoding |
+| # | Fact | Status | Default encoding |
+|---|---|---|---|
+| S1 | The console names the operator CR after the display name, lowercased, every non-`[a-z0-9]` character removed (`Org1 CA` → `org1ca`; `replace(' ', '-')` would give `org1-ca`, which is wrong). | Confirmed | `k8s_endpoint_services_cr_name_regex: "[^a-z0-9]"` |
+| S2 | Ordering node CR names are `<ordering service CR name>node<i>`, `i` = 1..N: one set of Services **per node**, not one per ordering service. | Confirmed | `k8s_endpoint_services_orderer_node_suffix: node` |
+| S3 | Operator pods carry the label `app: <CR name>`, the selector of the operator's own Services. | Confirmed | `k8s_endpoint_services_selector_key: app` |
+| S4 | The FQDNs are `<namespace>-<CR name>-<endpoint>.<domain>`; the container ports are those of the mapping table (orderer operations: 8443). | Confirmed | `k8s_endpoint_services_endpoints` |
+| S5 | Node TLS certificates carry every endpoint FQDN as a SAN. | Low risk (nginx is in SSL passthrough today) | — |
+
+### Internal role `k8s_endpoint_services`
+
+New role `roles/k8s_endpoint_services/` (documented in
+`docs/source/roles/k8s_endpoint_services.rst`). The organization roles call it
+with `include_role` and pass every input explicitly, so it reads no variable
+of the calling role.
+
+| Entry point | Inputs | Effect |
 |---|---|---|
-| S1 | The operator CR name is the display name lowercased with every non-`[a-z0-9]` character removed (`Org1 CA` → `org1ca`). | `k8s_endpoint_services_cr_name_regex: '[^a-z0-9]'` |
-| S2 | Ordering node CR names are `<ordering service cr_name>node<i>`, `i` = 1..N. | `k8s_endpoint_services_orderer_node_suffix: 'node'` |
-| S3 | Operator pods carry the label `app: <cr_name>`, as used by the operator's own Service selector. | `k8s_endpoint_services_selector_key: app` |
-| S4 | Node TLS certificates already carry every endpoint FQDN as a SAN. nginx runs in SSL-passthrough mode today, so this is low risk. | — (no change expected) |
+| `main.yml` | `k8s_endpoint_services_namespace`, `_component` (`ca`, `peer`, `orderer`), `_names` (console display names), `_orderer_nodes` | Derives the CR names (S1, S2) and creates one Service per CR name × endpoint, from `templates/service.yaml.j2`. Fails if a Service name is not a DNS label. |
+| `verify.yml` | same, plus `k8s_endpoint_services_urls` | Fails if the first label of a URL reported by the console is not one of the Service names. |
+| `delete.yml` | same as `main.yml` | Deletes the Services by name. |
 
-### New internal role `k8s_endpoint_services`
-
-The three organization roles are separate playbooks and cannot share task
-files, so the logic lives in a small role called via `include_role`. Its
-Kubernetes dependency (`kubernetes.core`, a kubeconfig) is pulled in **only**
-when a component is not exposed. The REST-only path of the organization roles
-stays unchanged.
-
-`roles/k8s_endpoint_services/defaults/main.yml`:
-
-```yaml
-k8s_endpoint_services_namespace: "{{ k8s_namespace | default('default') }}"
-# Kind of component the Services are created for: ca | peer | orderer.
-k8s_endpoint_services_component: ""
-# Operator CR names, one per node (see S1/S2 in MIGRATION-STEP-1.md).
-k8s_endpoint_services_cr_names: []
-k8s_endpoint_services_cr_name_regex: '[^a-z0-9]'
-k8s_endpoint_services_orderer_node_suffix: node
-k8s_endpoint_services_selector_key: app
-# Endpoint types per component and the native container port each maps to.
-k8s_endpoint_services_endpoints:
-  ca:
-    - { endpoint: ca, target_port: 7054 }
-    - { endpoint: operations, target_port: 9443 }
-  peer:
-    - { endpoint: peer, target_port: 7051 }
-    - { endpoint: operations, target_port: 9443 }
-    - { endpoint: grpcweb, target_port: 7443 }
-  orderer:
-    - { endpoint: orderer, target_port: 7050 }
-    - { endpoint: admin, target_port: 9443 }
-    - { endpoint: operations, target_port: 8443 }
-    - { endpoint: grpcweb, target_port: 7443 }
-# Console URLs to verify after the module call (tasks_from: verify).
-k8s_endpoint_services_urls: []
-```
-
-`roles/k8s_endpoint_services/tasks/main.yml` (create):
-
-```yaml
-- name: Check every Service name is a valid DNS-1035 label
-  ansible.builtin.assert:
-    that:
-      - _svc_name is match('^[a-z]([-a-z0-9]*[a-z0-9])?$')
-      - _svc_name | length <= 63
-    fail_msg: >-
-      Service name '{{ _svc_name }}' is not a valid DNS-1035 label. Shorten the
-      namespace or the component display name.
-    quiet: true
-  loop: "{{ k8s_endpoint_services_cr_names | product(k8s_endpoint_services_endpoints[k8s_endpoint_services_component]) | list }}"
-  vars:
-    _svc_name: "{{ k8s_endpoint_services_namespace }}-{{ item.0 }}-{{ item.1.endpoint }}"
-
-- name: Create one ClusterIP Service per endpoint
-  kubernetes.core.k8s:
-    state: present
-    definition:
-      apiVersion: v1
-      kind: Service
-      metadata:
-        name: "{{ _svc_name }}"
-        namespace: "{{ k8s_endpoint_services_namespace }}"
-        labels:
-          app.kubernetes.io/managed-by: fabric-ansible-collection
-          fabric-ansible-collection/component: "{{ k8s_endpoint_services_component }}"
-          fabric-ansible-collection/instance: "{{ item.0 }}"
-          fabric-ansible-collection/endpoint: "{{ item.1.endpoint }}"
-      spec:
-        type: ClusterIP
-        selector: "{{ {k8s_endpoint_services_selector_key: item.0} }}"
-        ports:
-          - name: https
-            port: 443
-            # Must stay an int: a string targetPort is a *named* port.
-            targetPort: "{{ item.1.target_port | int }}"
-            protocol: TCP
-  loop: "{{ k8s_endpoint_services_cr_names | product(k8s_endpoint_services_endpoints[k8s_endpoint_services_component]) | list }}"
-  loop_control:
-    label: "{{ _svc_name }}"
-  vars:
-    _svc_name: "{{ k8s_endpoint_services_namespace }}-{{ item.0 }}-{{ item.1.endpoint }}"
-```
-
-`roles/k8s_endpoint_services/tasks/verify.yml`:
-
-```yaml
-- name: Assert every console endpoint URL has a matching per-endpoint Service
-  ansible.builtin.assert:
-    that:
-      - (item | urlsplit('hostname')).split('.') | first in _expected_names
-    fail_msg: >-
-      The console advertises '{{ item }}' but no Service named
-      '{{ (item | urlsplit('hostname')).split('.') | first }}' was created.
-      Check assumptions S1–S3 in MIGRATION-STEP-1.md sub-task 1.3b.
-    quiet: true
-  loop: "{{ k8s_endpoint_services_urls | select | list }}"
-  vars:
-    _expected_names: >-
-      {{ k8s_endpoint_services_cr_names
-         | product(k8s_endpoint_services_endpoints[k8s_endpoint_services_component] | map(attribute='endpoint'))
-         | map('join', '-')
-         | map('regex_replace', '^', k8s_endpoint_services_namespace ~ '-')
-         | list }}
-```
-
-`roles/k8s_endpoint_services/tasks/delete.yml`:
-
-```yaml
-- name: Delete the per-endpoint Services of the given instances
-  kubernetes.core.k8s:
-    state: absent
-    kind: Service
-    namespace: "{{ k8s_endpoint_services_namespace }}"
-    label_selectors:
-      - app.kubernetes.io/managed-by=fabric-ansible-collection
-      - fabric-ansible-collection/instance={{ item }}
-  loop: "{{ k8s_endpoint_services_cr_names }}"
-```
+Design notes:
+- The CR names are derived **inside** the role (`tasks/names.yml`), from the
+  display names the organization roles already use. The S1/S2 rule therefore
+  lives in one place instead of being repeated in each organization role.
+- The Service is rendered from a YAML template: with an inline `definition`,
+  `targetPort: "{{ ... | int }}"` reaches the API as the string `"7054"`, a
+  named port, and the API rejects it.
 
 ### Calls from the organization roles
 
-`roles/endorsing_organization/tasks/create.yml`:
+Guard (REVIEW, Organization roles): the call runs **only** when
+`expose_ca`, `expose_peer` or `expose_orderer` is `false`. With the defaults
+(`true`), the organization roles keep talking only to the console REST API
+and need neither `kubernetes.core` nor a kubeconfig. Each organization role
+declares the variables it reads in its own defaults (`expose_ca`,
+`expose_peer` or `expose_orderer`, `namespace`, empty by default and then
+required), as the console roles do.
 
-```yaml
-- name: Create per-endpoint Services for the CA (expose-none)
-  ansible.builtin.include_role:
-    name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
-  vars:
-    k8s_endpoint_services_component: ca
-    k8s_endpoint_services_cr_names:
-      - "{{ ca_name | lower | regex_replace('[^a-z0-9]', '') }}"
-  when: not expose_ca | default(true) | bool
+| Role | Before the module call | Module output registered | After the module call |
+|---|---|---|---|
+| `endorsing_organization` | Services of the CA (`[ca_name]`) | `endorsing_organization_ca` | `verify` with `api_url`, `operations_url` |
+| `endorsing_organization` | Services of the peers (`[peer_name]`, or `peer_name` + 1..`peers`) | `endorsing_organization_peer` (one peer), `endorsing_organization_peers` (loop) | `verify` with `api_url`, `operations_url`, `grpcwp_url` of each peer |
+| `ordering_organization` | Services of the CA | `ordering_organization_ca` | as above |
+| `ordering_organization` | Services of the nodes (`[ordering_service_name]`, `ordering_service_nodes`) | `ordering_organization_ordering_service` (one element per node) | `verify` with `api_url`, `operations_url`, `grpcwp_url`, `osnadmin_url` of each node (`osnadmin_url` is empty before Fabric 2.4.1 and ignored) |
 
-- name: Create certificate authority          # existing task, add `register`
-  hyperledger.fabric_ansible_collection.certificate_authority: ...
-  register: endorsing_organization_ca
+The `delete.yml` of each organization role calls `tasks_from: delete` with the
+same inputs and the same guard.
 
-- name: Verify per-endpoint Services for the CA (expose-none)
-  ansible.builtin.include_role:
-    name: hyperledger.fabric_ansible_collection.k8s_endpoint_services
-    tasks_from: verify
-  vars:
-    k8s_endpoint_services_component: ca
-    k8s_endpoint_services_cr_names:
-      - "{{ ca_name | lower | regex_replace('[^a-z0-9]', '') }}"
-    k8s_endpoint_services_urls:
-      - "{{ endorsing_organization_ca.certificate_authority.api_url }}"
-      - "{{ endorsing_organization_ca.certificate_authority.operations_url }}"
-  when: not expose_ca | default(true) | bool
-```
-
-Same pattern for the peers (before *Create peer* / *Create multiple peers*):
-
-```yaml
-    k8s_endpoint_services_component: peer
-    k8s_endpoint_services_cr_names: >-
-      {{ ([peer_name] if peers == 1
-          else range(1, peers + 1) | map('string')
-               | map('regex_replace', '^', peer_name) | list)
-         | map('lower') | map('regex_replace', '[^a-z0-9]', '') | list }}
-```
-
-Verify with `api_url`, `operations_url` and `grpcwp_url` of each registered
-peer. For *Create multiple peers*, use the `results` list.
-
-`roles/ordering_organization/tasks/create.yml`: the same CA block, plus,
-before *Create ordering service*:
-
-```yaml
-    k8s_endpoint_services_component: orderer
-    k8s_endpoint_services_cr_names: >-
-      {{ range(1, ordering_service_nodes + 1) | map('string')
-         | map('regex_replace', '^', (ordering_service_name | lower
-               | regex_replace('[^a-z0-9]', '')) ~ 'node')
-         | list }}
-```
-
-After the module call, run the verify step with `api_url`, `operations_url`,
-`grpcwp_url` and `osnadmin_url` of every element of the registered
-`ordering_service` list. `osnadmin_url` is empty on Fabric < 2.4.1, and
-`select` drops empty values.
-
-The `delete.yml` of each organization role calls
-`tasks_from: delete` with the same `cr_names`, guarded by the same `when`.
+There is no `certificate_authority` role: the CA is created by the
+`certificate_authority` **module**, called from both organization roles. CA
+tasks (here, and the routes of W6) go next to that call in each role.
 
 **Expected outcomes:**
 - With `expose_ca/peer/orderer: false`, the namespace contains one Service per
   row of the mapping table for every node, each listening on `443` only.
 - The operator's own Services are byte-for-byte unchanged.
-- `curl -k https://<ns>-<peer>-operations.<ingress_domain>/healthz` from an
+- `curl -k https://<ns>-<peer>-operations.<console_domain>/healthz` from an
   in-cluster pod returns `{"status":"OK"}` (port 9443 reached, not 7051).
 - The module health waits pass without nginx in the path.
-- The verify step fails loudly (naming S1–S3) when the console advertises an
-  endpoint without a matching Service.
+- The verify step fails loudly (naming the CR name defaults) when the console
+  advertises an endpoint without a matching Service.
 - `ansible-lint` passes on the new role and all modified task files.
 
 **Todo list:**
 - [ ] Create `roles/k8s_endpoint_services/` (`defaults/main.yml`,
-  `tasks/main.yml`, `tasks/verify.yml`, `tasks/delete.yml`, `meta/main.yml`)
-  with the content above.
+  `tasks/main.yml`, `tasks/names.yml`, `tasks/verify.yml`, `tasks/delete.yml`,
+  `templates/service.yaml.j2`, `meta/main.yml`).
 - [ ] Add the create / verify blocks around the CA and peer module calls in
   `roles/endorsing_organization/tasks/create.yml`, and register the module
   outputs (`endorsing_organization_ca`, `endorsing_organization_peer`,
@@ -644,41 +370,54 @@ The `delete.yml` of each organization role calls
   module calls in `roles/ordering_organization/tasks/create.yml`, and
   register the module outputs.
 - [ ] Add the delete calls to both organization roles' `delete.yml`.
-- [ ] Run the operator spike and adjust the S1–S3 defaults if needed.
-- [ ] Document the new role in `docs/source/roles/` (internal, but its
-  defaults are user-overridable).
+- [ ] Declare `expose_*` and `namespace` in the defaults of both organization
+  roles; extend `tests/unit/test_role_defaults_consistency.py`.
+- [ ] Re-run the operator spike if the operator version changes (S1–S4 were
+  confirmed on `fabric-operator` 1.0.9, see above).
+- [ ] Document the new role in `docs/source/roles/` and the new parameters of
+  both organization roles.
 - [ ] Run `ansible-lint` on the new role and all modified task files.
+- [ ] End-to-end run of the organization roles with `expose_*: false` from
+  inside the cluster (sub-task 1.5). From a workstation, the CA enrollment
+  tasks need the CA reachable through the ingress.
 
 **Relevant context:**
 - Sub-task 1.3b runs whenever the component is not exposed, **including**
-  when `ingress_domain` is cluster-local. Only the CoreDNS rewrites (1.4b)
-  are skipped in that case.
+  with an internal `console_domain` (rejected for now by 1.1b). Only the
+  CoreDNS rewrites (1.4b) are skipped in that case.
 - Partial exposure (e.g. `expose_peer: false`, `expose_ca: true`) works on
   the Service side. The CI per-endpoint-type rewrites of sub-task 1.4b,
   however, assume CA, peer and orderer are **all** unexposed, because the
   `-operations` suffix is shared by all three components. Mixed modes need
   exact per-FQDN rewrites and are out of scope for Step 1 CI.
-- The port variables `ingress_grpc_peer_port`, `ingress_grpc_orderer_port`
-  and `ingress_ca_port` from sub-task 1.1 remain Gateway-API listener ports
-  for Step 2. They are **not** the native target ports above.
+- The Gateway-API listener ports (`ingress_grpc_peer_port`, …) are declared by
+  Step 2, not Step 1. They are **not** the native target ports above.
 
 ---
 
 ## Sub-task 1.4 — `run-tests.sh` variable injection for Step 1 flags
 
-**Intent:** Extend the stabilized `run-tests.sh` (fixed in Step 0) to inject the newly introduced `INGRESS_TYPE` and `EXPOSE_*` variables into `tutorial/common-vars.yml`.
+**Intent:** Extend the stabilized `run-tests.sh` (fixed in Step 0) to inject the
+Step 1 variables into `tutorial/common-vars.yml`, and make the organization
+playbooks pass the namespace the new roles need.
 
 *(Note: Baseline fixes for positional argument crashes, `TEST_RUN_ID` stamping, and connection variable injection are implemented in [`MIGRATION-STEP-0.md`](./MIGRATION-STEP-0.md) Sub-task 0.2).*
 
 **Expected outcomes:**
-- `run-tests.sh` reads `INGRESS_TYPE` (default: `nginx`) and all `EXPOSE_*` flags from the environment (defaulting to safe values).
-- `ingress_type` and `expose_*` flags are patched into `common-vars.yml` via `yq` prior to playbook execution.
+- `run-tests.sh` reads `INGRESS_TYPE` (default `nginx`) and `EXPOSE_CONSOLE`,
+  `EXPOSE_CA`, `EXPOSE_PEER`, `EXPOSE_ORDERER` (default `true`) from the
+  environment and patches `ingress_type` and the four `expose_*` into
+  `common-vars.yml` with `yq`, before any playbook runs. Only variables the
+  roles read are injected (sub-task 1.1).
+- The playbooks that call the organization roles receive `namespace`.
 
 **Todo list:**
-- [ ] Update `.github/scripts/run-tests.sh` to include `yq` patching for `ingress_type` and the six `expose_*` boolean variables into `common-vars.yml`.
-- [ ] Confirm that `INGRESS_TYPE`, `EXPOSE_CA`, `EXPOSE_PEER`, `EXPOSE_ORDERER`,
-  `EXPOSE_PEER_OPERATIONS`, `EXPOSE_ORDERER_OPERATIONS`, and `EXPOSE_GRPCWEB`
-  all default to safe values when not explicitly set.
+- [ ] Update `.github/scripts/run-tests.sh` with the `yq` patching above.
+- [ ] Add `namespace: "{{ k8s_namespace | default('default') }}"` to the plays of
+  `tutorial/01-…`, `02-…`, `12-…` (create) and `97-…`, `98-…`, `99-…` (delete),
+  which call `endorsing_organization` / `ordering_organization` and do not pass a
+  namespace today. Without it, an unexposed component fails with "namespace not
+  specified".
 - [ ] Verify `bash -n .github/scripts/run-tests.sh` passes syntax validation.
 
 **Relevant context:**
@@ -691,14 +430,14 @@ The `delete.yml` of each organization role calls
 
 ## Sub-task 1.4b — CoreDNS per-endpoint-type rewrites for the `expose-none` CI leg
 
-**Intent:** When `expose_*: false` with an external `ingress_domain` (CI:
+**Intent:** When `expose_*: false` with an external `console_domain` (CI:
 `<ip>.nip.io` or `localho.st`), the existing CoreDNS wildcard rewrites
 (`rewrite name regex (.*)\.<domain> host.ingress.internal`) send every
 component FQDN to the nginx ClusterIP, which silently routes traffic through
 nginx when the intent is to bypass it. This sub-task adds **one rewrite rule
 per endpoint type** (`ca`, `peer`, `orderer`, `operations`, `grpcweb`,
 `admin`). Each rule maps
-`<ns>-<cr>-<endpoint>.<ingress_domain>` to the per-endpoint Service
+`<ns>-<cr>-<endpoint>.<console_domain>` to the per-endpoint Service
 `<ns>-<cr>-<endpoint>.<ns>.svc.<cluster_domain>` created by sub-task 1.3b.
 Every endpoint therefore lands on its own native port: `-operations` reaches
 9443/8443, `-grpcweb` reaches 7443 and `-admin` reaches 9443, never the API
@@ -707,9 +446,10 @@ port.
 The dialled hostname stays the original FQDN, so TLS SANs remain valid and no
 `csr_hosts` change or re-enrollment is needed.
 
-**Cluster-local domain exception:** when `ingress_domain` is
+**Cluster-local domain exception:** when the domain is
 `<namespace>.svc.<cluster_domain>`, the FQDNs are already the per-endpoint
-Service FQDNs. No rewrite is applied.
+Service FQDNs. No rewrite is applied. (Sub-task 1.1b rejects internal domains
+for now, so this branch is dormant until that rule is lifted.)
 
 **Design constraints:**
 - The rules are applied by the CI bootstrap script
@@ -856,27 +596,29 @@ the cluster** using a Kubernetes Job.
 - `fail-fast: false` is set so both legs always complete.
 - The `expose-none` leg succeeds: build, join, and deploy all exit 0.
 
-**Job manifest specification:**
-
-The Kubernetes Job YAML (committed to `.github/k8s/ansible-runner-job.yml` or
-inlined in the CI script) must specify:
-
-- **Container image**: an image containing Python 3, Ansible,
-  `hyperledger.fabric_ansible_collection` (installed from the collection
-  tarball built in the same CI run), the Hyperledger Fabric `peer` binary, and
-  `configtxlator`. Use the same set of dependencies that the Actions runner
-  installs for the `expose-all` leg. Base the image on
-  `hyperledger/fabric-tools:<version>` and layer Ansible on top; document the
-  resulting Dockerfile at `.github/docker/ansible-runner/Dockerfile`.
-- **`restartPolicy: Never`** — failures surface as a failed Job rather than
-  silent retries.
-- **Tutorial files mount**: a `ConfigMap` (`tutorial-files`) created by a
-  preceding CI step (`kubectl create configmap tutorial-files --from-file=tutorial/`)
-  mounted at `/workspace/tutorial`.
-- **`api_endpoint` override**: the in-cluster console Service URL
-  `http://<console-svc>.<namespace>.svc.cluster.local:3000`.
-- **Environment variables** injected for: `INGRESS_TYPE`, `EXPOSE_CA`,
-  `EXPOSE_PEER`, `EXPOSE_ORDERER`, `EXPOSE_CONSOLE`, `WAIT_TIMEOUT`.
+**Job specification** (`.github/k8s/ansible-runner-job.yml`):
+- **Image** (`.github/docker/ansible-runner/Dockerfile`): based on
+  `hyperledger/fabric-tools:<version>`, with Python 3, Ansible, the collection
+  installed from the tarball built in the same CI run, the `peer` binary and
+  `configtxlator`. The **`tutorial/` directory is copied into the image**
+  (`/workspace/tutorial`), and the image is rebuilt on every run. This replaces
+  a ConfigMap mount, which would be read-only (the playbooks write their JSON
+  identity files), flattened (`--from-file` does not recurse) and limited to
+  1 MiB.
+- **Permissions:** a `ServiceAccount` (`ansible-runner`) with a `Role` and a
+  `RoleBinding` in the network namespace, referenced by `serviceAccountName`.
+  The role needs `get`, `list`, `create`, `update`, `patch` and `delete` on
+  `services` (created and deleted by `k8s_endpoint_services`), and `get` / `list`
+  on `deployments` for the console readiness. `kubernetes.core` uses the in-cluster
+  configuration, so no kubeconfig is mounted. Start from this minimal set and
+  widen it only on a `Forbidden` error.
+- **Console endpoint:** `https://<console-svc>.<namespace>.svc.<cluster_domain>:3000`
+  (HTTPS, see sub-task 1.3). The Job script patches `api_endpoint` in
+  `common-vars.yml` with `yq`, as `run-tests.sh` does.
+- **Environment variables:** `INGRESS_TYPE`, `EXPOSE_CONSOLE`, `EXPOSE_CA`,
+  `EXPOSE_PEER`, `EXPOSE_ORDERER`, `WAIT_TIMEOUT`, `K8S_NAMESPACE`.
+- **`restartPolicy: Never`** and `backoffLimit: 0`: a failure surfaces as a
+  failed Job, not as silent retries.
 - **Job command** (with `set -e`):
   ```bash
   set -e
@@ -895,23 +637,22 @@ inlined in the CI script) must specify:
   runner-side `run-tests.sh` invocation — this path is unchanged.
 - [ ] For `expose-none`: set all four `EXPOSE_*` flags to `false` in
   `$GITHUB_ENV`. Keep `INGRESS_TYPE=nginx`.
-- [ ] Create `.github/docker/ansible-runner/Dockerfile` based on
-  `hyperledger/fabric-tools:<version>` with Ansible and
-  `hyperledger.fabric_ansible_collection` layered on top.
+- [ ] Create `.github/docker/ansible-runner/Dockerfile` as described above.
+- [ ] Create `.github/k8s/ansible-runner-job.yml` with the `ServiceAccount`,
+  `Role`, `RoleBinding` and `Job`.
 - [ ] Add the following CI steps, each guarded by
   `if: matrix.scenario == 'expose-none'`:
-  1. **Build and load runner image**: `docker build -t ansible-runner:ci
-     .github/docker/ansible-runner/ && kind load docker-image ansible-runner:ci`
-  2. **Create tutorial ConfigMap**:
-     `kubectl create configmap tutorial-files --from-file=tutorial/`
-  3. **Apply Job manifest**:
+  1. **Build and load runner image**: build the collection tarball, then
+     `docker build -t ansible-runner:ci` with the repository as context, and
+     `kind load docker-image ansible-runner:ci`
+  2. **Apply the manifests**:
      `kubectl apply -f .github/k8s/ansible-runner-job.yml`
-  4. **Wait for Job completion**:
+  3. **Wait for Job completion**:
      `kubectl wait --for=condition=complete --timeout=20m job/ansible-runner`
-  5. **Retrieve logs** (unconditional, runs even on failure — use
+  4. **Retrieve logs** (unconditional, runs even on failure — use
      `if: always() && matrix.scenario == 'expose-none'`):
      `kubectl logs job/ansible-runner`
-  6. **Assert Job succeeded**:
+  5. **Assert Job succeeded**:
      ```bash
      phase=$(kubectl get job ansible-runner \
        -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}')
@@ -919,14 +660,13 @@ inlined in the CI script) must specify:
      ```
 - [ ] Add `name: FV test (nginx / ${{ matrix.scenario }})` to the job.
 - [ ] Run `yamllint` on the modified workflow file.
-- [ ] Commit `.github/k8s/ansible-runner-job.yml` and
-  `.github/docker/ansible-runner/Dockerfile` as part of this sub-task.
+- [ ] Commit the manifest and the Dockerfile as part of this sub-task.
 
 **Relevant context:**
 - The `expose-all` leg is entirely unaffected by this sub-task — the `if:`
   conditions ensure the Job steps are skipped when `matrix.scenario == 'expose-all'`.
-- The Job image must be available inside the KIND cluster (use
-  `kind load docker-image` after building locally or in CI).
+- The Job image must be available inside the KIND cluster (`kind load
+  docker-image`).
 - Gateway API (`ingress_type: gateway-api`) matrix legs are **not** added in
   this step; leave a comment stub for Step 2.
 - Reference full matrix design: MIGRATION-PLAN.md §5.3.4.
@@ -951,26 +691,29 @@ in-cluster Ansible Job from sub-task 1.5 completes.
 **Todo list:**
 
 - [ ] **Assertion 1 — No external Ingress objects for CA/peer/orderer**
-  (runner-side, no ephemeral pod needed):
+  (runner-side, no ephemeral pod needed). **Depends on the decision B2:** with
+  option (a) the operator's Ingress objects still exist and this assertion is
+  dropped; with option (b) (an operator flag) it must pass. When it applies:
   ```bash
-  count=$(kubectl get ingress -n fabricinfra -o name \
-    | grep -cvE 'console' || true)
+  NS="${K8S_NAMESPACE:-default}"
+  count=$(kubectl get ingress -n "$NS" -o name | grep -cvE 'console' || true)
   [ "$count" -eq 0 ] \
-    || (echo "Unexpected Ingress objects found for non-console components" && exit 1)
+    || { echo "Unexpected Ingress objects found for non-console components"; exit 1; }
   ```
-  _Failure indicates_: an `expose_*` flag was not honoured by the operator, or
-  the Ansible role created Ingress objects despite `expose_*: false`.
+  _Failure indicates_: an `expose_*` flag was not honoured by the operator.
 
-- [ ] **Assertion 2 — Console ClusterIP Service responds** at its in-cluster URL:
+- [ ] **Assertion 2 — Console ClusterIP Service responds** at its in-cluster URL,
+  over HTTPS, on the unauthenticated `/health` path (`/ak/api/v3/health` answers
+  401). The console Service is named after the console (`hlf-console` by default):
   ```bash
-  kubectl run curl-console \
-    --image=curlimages/curl:latest --restart=Never --rm -i \
-    --namespace fabricinfra \
-    -- curl -sf \
-    http://<console-svc>.fabricinfra.svc.cluster.local:3000/ak/api/v3/health
+  NS="${K8S_NAMESPACE:-default}"
+  CONSOLE="${CONSOLE_NAME:-hlf-console}"
+  kubectl run curl-console --image=curlimages/curl:8.10.1 \
+    --restart=Never --rm -i --namespace "$NS" -- \
+    curl -skf "https://${CONSOLE}.${NS}.svc.${CLUSTER_DOMAIN:-cluster.local}:3000/health"
   ```
   _Failure indicates_: the console pod is not running, the Service selector is
-  wrong, or the health endpoint path has changed.
+  wrong, or the protocol or path changed.
 
 - [ ] **Assertions 3–6 — common preamble.** Endpoints are discovered from
   the labelled Services of sub-task 1.3b, so no node name is hardcoded:
@@ -1081,9 +824,10 @@ in-cluster Ansible Job from sub-task 1.5 completes.
   expected are wrapped as `rc=0; cmd || rc=$?`.
 
 **Relevant context:**
-- Assertions 1–2 still use the placeholder values `fabricinfra` and
-  `<console-svc>`. Replace them with `$NS` and the console Service name from
-  the CI environment before committing.
+- Nothing is hardcoded: the namespace, the console name and the cluster domain
+  come from the CI environment. Assertions 3–6 take the list of endpoints from
+  the Services the collection created (labels), so every organization (Org1,
+  Org2, …) and every node is covered, whatever the randomised names.
 - Assertions 3–6 cover **every** endpoint of **every** node, discovered from
   the `fabric-ansible-collection/*` labels. Adding peers or orderer nodes
   needs no change here.
@@ -1178,8 +922,9 @@ A Step 1 delivery is considered complete when all of the following pass:
    or weakened.
 5. The `nginx/expose-none` leg runs the tutorial playbooks inside the KIND
    cluster via a Kubernetes Job (sub-task 1.5) and all six reachability
-   assertions pass (sub-task 1.6): no Ingress objects for CA/peer/orderer;
-   console health endpoint returns HTTP 200 in-cluster; one Service per
+   assertions pass (sub-task 1.6): no Ingress objects for CA/peer/orderer (only
+   if B2 option (b) is chosen);
+   console `/health` returns HTTP 200 in-cluster over HTTPS; one Service per
    endpoint exists with the expected `443 → targetPort` and ready backends;
    every operations FQDN answers `/healthz` on `:443`; every API, CA, grpcweb
    and admin FQDN accepts TLS on `:443`; each endpoint FQDN resolves to its
@@ -1190,17 +935,20 @@ A Step 1 delivery is considered complete when all of the following pass:
    to that endpoint's native port (sub-task 1.3b), with **one CoreDNS rewrite
    per endpoint type** (sub-task 1.4b). The operator's own Services are left
    unmodified, and console registry entries are not mutated.
-7. Cluster-local domain handling (sub-tasks 1.1 and 1.1b):
-   - Setting `ingress_domain: <namespace>.svc.<cluster_domain>` with all
-     `expose_*: false` runs without error: the per-endpoint Services are
-     created and no CoreDNS rewrite is applied.
-   - Setting `ingress_domain: <namespace>.svc.<cluster_domain>` with any
-     `expose_*: true` causes the play to fail immediately with a message listing
-     the conflicting flags.
-   - Setting any other `*.<cluster_domain>` value (e.g. `svc.cluster.local`)
-     fails immediately, naming the only supported form.
-   - The cluster domain is auto-discovered from a pod's `/etc/resolv.conf`; a
-     fallback warning is printed (not an error) when discovery fails.
+7. Domain handling (sub-tasks 1.1 and 1.1b), checked at role entry, for an
+   external domain nothing changes:
+   - `ingress_type` other than `nginx` fails.
+   - `console_domain: <namespace>.svc.<cluster_domain>` with any `expose_*: true`
+     fails immediately, listing the conflicting flags.
+   - `console_domain: <namespace>.svc.<cluster_domain>` with all `expose_*: false`
+     fails with a message stating that the internal domain is not supported yet
+     (optional feature, B3).
+   - Any other domain inside `cluster_domain` (e.g. `svc.cluster.local`) fails
+     immediately, naming the only supported form.
+   - `cluster_domain` is never discovered from the cluster: it defaults to
+     `cluster.local` and is overridden by the user.
+   - Every role declares the variables it reads in its own defaults, and the
+     unit test checking them passes.
 8. `docs/source` builds without warnings (`make -C docs html`).
 9. No Gateway API CRD, template, task, or Kubernetes resource is introduced —
    the Gateway API path is entirely absent from the codebase at this stage.
