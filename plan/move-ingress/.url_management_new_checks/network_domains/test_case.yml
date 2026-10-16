@@ -1,0 +1,47 @@
+---
+# A templated `set_fact: "{{ dict }}"` is a silent no-op in ansible-core 2.18,
+# so each input is set explicitly from the case (unset = role default).
+- name: Set the case inputs and reset the outputs of the previous case
+  ansible.builtin.set_fact:
+    exposed_domain: "{{ case.vars.exposed_domain | default('') }}"
+    console_domain: "{{ case.vars.console_domain | default('') }}"
+    hlf_network_domain: "{{ case.vars.hlf_network_domain | default('') }}"
+    cluster_domain: "{{ case.vars.cluster_domain | default('') }}"
+    expose_console: "{{ case.vars.expose_console | default(true) }}"
+    expose_ca: "{{ case.vars.expose_ca | default(true) }}"
+    expose_peer: "{{ case.vars.expose_peer | default(true) }}"
+    expose_orderer: "{{ case.vars.expose_orderer | default(true) }}"
+    network_domains_cluster_domain: ""
+    hlf_node_domain: ""
+    hlf_network_domain_is_cluster_local: false
+    console_url: ""
+
+- name: "Run network_domains: {{ case.name }}"
+  block:
+    - name: Include the role
+      ansible.builtin.include_role:
+        name: network_domains
+        public: true
+      vars:
+        network_domains_namespace: default
+        network_domains_console_name: hlf-console
+    - name: Record success
+      ansible.builtin.set_fact:
+        _ok: true
+  rescue:
+    - name: Record failure
+      ansible.builtin.set_fact:
+        _ok: false
+        _err: "{{ ansible_failed_result.msg | default('') | truncate(90) }}"
+
+- name: Compare with the expected outcome
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'PASS' if _pass | bool else 'FAIL' }} | {{ case.name }} |
+      {% if _ok %}node={{ hlf_node_domain }} local={{ hlf_network_domain_is_cluster_local }} cd={{ network_domains_cluster_domain }} url={{ console_url }}{% else %}failed: {{ _err }}{% endif %}
+  vars:
+    _pass: >-
+      {{ (_ok == case.want.ok) and (not _ok or (
+           hlf_node_domain == case.want.node
+           and (hlf_network_domain_is_cluster_local | bool) == case.want.local
+           and network_domains_cluster_domain == case.want.cd)) }}

@@ -1,0 +1,27 @@
+---
+# Runs the network_domains role once per case and compares the outcome.
+# Usage (from this directory, with KUBECONFIG pointing at the KIND cluster):
+#   ansible-playbook -i localhost, -c local test.yml
+- name: Test the network_domains role
+  hosts: localhost
+  gather_facts: false
+  vars:
+    cases:
+      - {name: "A default, console_domain alias", vars: {console_domain: 127-0-0-1.nip.io}, want: {ok: true, node: 127-0-0-1.nip.io, local: false, cd: ""}}
+      - {name: "A exposed_domain", vars: {exposed_domain: 127-0-0-1.nip.io}, want: {ok: true, node: 127-0-0-1.nip.io, local: false, cd: ""}}
+      - {name: "alias conflict", vars: {exposed_domain: a.example.com, console_domain: b.example.com}, want: {ok: false}}
+      - {name: "no domain", vars: {}, want: {ok: false}}
+      - {name: "B cluster-local", vars: {exposed_domain: example.com, hlf_network_domain: cluster.local, expose_console: false, expose_ca: false, expose_peer: false, expose_orderer: false}, want: {ok: true, node: default.svc.cluster.local, local: true, cd: cluster.local}}
+      - {name: "B with console exposed", vars: {exposed_domain: example.com, hlf_network_domain: cluster.local, expose_ca: false, expose_peer: false, expose_orderer: false}, want: {ok: true, node: default.svc.cluster.local, local: true, cd: cluster.local}}
+      - {name: "V3 cluster-local + exposed peer", vars: {exposed_domain: example.com, hlf_network_domain: cluster.local, expose_ca: false, expose_orderer: false}, want: {ok: false}}
+      - {name: "V2 sub-zone", vars: {exposed_domain: example.com, hlf_network_domain: default.svc.cluster.local, expose_ca: false, expose_peer: false, expose_orderer: false}, want: {ok: false}}
+      - {name: "V1 exposed inside cluster", vars: {exposed_domain: svc.cluster.local, expose_console: false}, want: {ok: false}}
+      - {name: "C unexposed, previous way", vars: {exposed_domain: 127-0-0-1.nip.io, expose_console: false, expose_ca: false, expose_peer: false, expose_orderer: false}, want: {ok: true, node: 127-0-0-1.nip.io, local: false, cd: cluster.local}}
+      - {name: "cluster_domain matches", vars: {exposed_domain: example.com, cluster_domain: Cluster.Local.}, want: {ok: true, node: example.com, local: false, cd: cluster.local}}
+      - {name: "cluster_domain mismatch", vars: {exposed_domain: example.com, cluster_domain: corp.internal}, want: {ok: false}}
+      - {name: "D external HLF domain", vars: {exposed_domain: example.com, hlf_network_domain: Fabric.Example.com.}, want: {ok: true, node: fabric.example.com, local: false, cd: cluster.local}}
+  tasks:
+    - name: Run each case
+      ansible.builtin.include_tasks: test_case.yml
+      loop: "{{ cases }}"
+      loop_control: {loop_var: case, label: "{{ case.name }}"}

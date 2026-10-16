@@ -1,0 +1,35 @@
+- name: Create a CA through the console (check 1)
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Create certificate authority
+      hyperledger.fabric_ansible_collection.certificate_authority:
+        state: present
+        api_endpoint: "{{ lookup('env','API_ENDPOINT') }}"
+        api_authtype: basic
+        api_key: "{{ lookup('env','API_KEY') }}"
+        api_secret: "{{ lookup('env','API_SECRET') }}"
+        api_timeout: 300
+        name: "{{ ca_display_name }}"
+        config_override:
+          ca:
+            registry:
+              maxenrollments: -1
+              identities:
+                - name: admin
+                  pass: adminpw
+                  type: client
+                  maxenrollments: -1
+                  attrs:
+                    hf.Registrar.Roles: "*"
+                    hf.Registrar.DelegateRoles: "*"
+                    hf.Revoker: true
+                    hf.IntermediateCA: true
+                    hf.GenCRL: true
+                    hf.Registrar.Attributes: "*"
+                    hf.AffiliationMgr: true
+        wait_timeout: "{{ ca_wait | default(600) }}"
+      register: ca
+      ignore_errors: true
+    - ansible.builtin.debug:
+        msg: "{{ ca.certificate_authority | default(ca.msg) }}"

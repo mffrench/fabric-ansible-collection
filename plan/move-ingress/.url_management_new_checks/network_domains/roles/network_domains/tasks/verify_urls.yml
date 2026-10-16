@@ -1,0 +1,12 @@
+---
+# V5: every URL returned by a CA/peer/orderer module call is under hlf_node_domain.
+- name: Check the console uses the expected HLF node domain
+  ansible.builtin.assert:
+    that: (item | urlsplit('hostname')).endswith('.' ~ hlf_node_domain)
+    fail_msg: >-
+      The console created {{ item }}, which is not under '{{ hlf_node_domain }}'.
+      Either the console was deployed with another hlf_network_domain (check its
+      spec.deployer.domain, and restart the console after changing it), or
+      k8s_namespace differs from the console namespace.
+    quiet: true
+  loop: "{{ network_domains_urls | select | list }}"

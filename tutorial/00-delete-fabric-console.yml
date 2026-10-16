@@ -1,0 +1,113 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+- name: Deprovision Fabric Operations Console & CRDs
+  hosts: localhost
+  vars_files:
+    - common-vars.yml
+  vars:
+    target: "{{ k8s_target | default('k8s') }}"
+    namespace: "{{ k8s_namespace | default('default') }}"
+    console_name: "{{ hlf_console_name | default('hlf-console') }}"
+    image_pull_secret: "{{ console_image_pull_secret | default('ghcr-pull-secret') }}"
+    wait_timeout: "{{ wait_timeout | default(600) }}"
+  tasks:
+    - name: Determine if namespace exists
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Namespace
+        name: "{{ namespace }}"
+      register: namespace_info
+
+    - name: Determine if IBPConsole CRD exists
+      kubernetes.core.k8s_info:
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: ibpconsoles.ibp.com
+      register: crds_info
+
+    - name: Delete Fabric Operations Console CR
+      kubernetes.core.k8s:
+        state: absent
+        namespace: "{{ namespace }}"
+        api_version: ibp.com/v1beta1
+        kind: IBPConsole
+        name: "{{ console_name }}"
+        wait: true
+        wait_timeout: "{{ wait_timeout }}"
+      when: namespace_info.resources and crds_info.resources
+      ignore_errors: true
+
+    - name: Delete Fabric Operations Console Deployment (if remaining)
+      kubernetes.core.k8s:
+        state: absent
+        namespace: "{{ namespace }}"
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ console_name }}"
+        wait: true
+        wait_timeout: "{{ wait_timeout }}"
+      when: namespace_info.resources
+      ignore_errors: true
+
+    - name: Delete fabric-operator Deployment
+      kubernetes.core.k8s:
+        state: absent
+        namespace: "{{ namespace }}"
+        api_version: apps/v1
+        kind: Deployment
+        name: fabric-operator
+        wait: true
+        wait_timeout: "{{ wait_timeout }}"
+      when: namespace_info.resources
+      ignore_errors: true
+
+    - name: Delete ClusterRoleBinding
+      kubernetes.core.k8s:
+        state: absent
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+        name: hlf-operator-rolebinding
+      ignore_errors: true
+
+    - name: Delete ClusterRole
+      kubernetes.core.k8s:
+        state: absent
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRole
+        name: hlf-operator-role
+      ignore_errors: true
+
+    - name: Delete ServiceAccount
+      kubernetes.core.k8s:
+        state: absent
+        namespace: "{{ namespace }}"
+        api_version: v1
+        kind: ServiceAccount
+        name: hlf-operator
+      when: namespace_info.resources
+      ignore_errors: true
+
+    - name: Delete image pull secret
+      kubernetes.core.k8s:
+        state: absent
+        namespace: "{{ namespace }}"
+        api_version: v1
+        kind: Secret
+        name: "{{ image_pull_secret }}"
+      when: namespace_info.resources
+      ignore_errors: true
+
+    - name: Delete Custom Resource Definitions
+      kubernetes.core.k8s:
+        state: absent
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: "{{ item }}"
+      loop:
+        - ibpcas.ibp.com
+        - ibpconsoles.ibp.com
+        - ibporderers.ibp.com
+        - ibppeers.ibp.com
+      ignore_errors: true
