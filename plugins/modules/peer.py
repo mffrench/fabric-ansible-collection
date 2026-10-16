@@ -384,6 +384,17 @@ options:
             - The timeout, in seconds, to wait until the peer is available.
         type: int
         default: 60
+    wait_mode:
+        description:
+            - How to wait until the peer is available.
+            - C(operations) calls the operations URL (C(/healthz)) of the peer from the Ansible host.
+            - C(none) does not wait. Use it when the peer is not exposed outside of the Kubernetes
+              cluster, then wait with the M(k8s_component_ready) module.
+        type: str
+        default: operations
+        choices:
+            - operations
+            - none
 notes: []
 requirements: []
 '''
@@ -666,7 +677,8 @@ def main():
         zone=dict(type='str'),
         version=dict(type='str'),
         ignore_warnings=dict(type='bool', default=False),
-        wait_timeout=dict(type='int', default=60)
+        wait_timeout=dict(type='int', default=60),
+        wait_mode=dict(type='str', default='operations', choices=['operations', 'none'])
     )
     required_if = [
         ('api_authtype', 'basic', ['api_secret']),
@@ -955,8 +967,9 @@ def main():
 
         # Wait for the peer to start.
         peer = Peer.from_json(console.extract_peer_info(peer))
-        timeout = module.params['wait_timeout']
-        peer.wait_for(timeout)
+        if module.params['wait_mode'] == 'operations':
+            timeout = module.params['wait_timeout']
+            peer.wait_for(timeout)
 
         # Return the peer.
         module.exit_json(changed=changed, peer=peer.to_json())

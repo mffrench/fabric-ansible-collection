@@ -1,0 +1,53 @@
+{#
+ # SPDX-License-Identifier: Apache-2.0
+ #}
+# Chaincode server: one Deployment and one Service for each version, so that the
+# current version is served until the new one is committed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ k8s_chaincode_server }}
+  namespace: {{ namespace }}
+  labels: &labels
+    app: {{ k8s_chaincode_server }}
+    app.kubernetes.io/managed-by: fabric-ansible-collection
+    fabric-ansible-collection/chaincode: {{ chaincode_name }}
+    fabric-ansible-collection/chaincode-version: "{{ chaincode_version }}"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ k8s_chaincode_server }}
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      containers:
+        - name: chaincode
+          image: {{ chaincode_image }}
+          imagePullPolicy: {{ chaincode_image_pull_policy }}
+          ports:
+            - containerPort: {{ chaincode_port | int }}
+          env:
+            - name: CHAINCODE_ID
+              value: "{{ k8s_chaincode_install.package_id }}"
+            - name: CHAINCODE_SERVER_ADDRESS
+              value: "0.0.0.0:{{ chaincode_port }}"
+          resources: {{ chaincode_resources | to_json }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ k8s_chaincode_server }}
+  namespace: {{ namespace }}
+  labels:
+    app: {{ k8s_chaincode_server }}
+    app.kubernetes.io/managed-by: fabric-ansible-collection
+    fabric-ansible-collection/chaincode: {{ chaincode_name }}
+    fabric-ansible-collection/chaincode-version: "{{ chaincode_version }}"
+spec:
+  selector:
+    app: {{ k8s_chaincode_server }}
+  ports:
+    - port: {{ chaincode_port | int }}
+      targetPort: {{ chaincode_port | int }}

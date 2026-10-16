@@ -1,0 +1,31 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# The organization that signs, and the components, all from its console:
+# api_endpoint, api_authtype, api_key, api_secret, api_token_endpoint, api_timeout,
+# namespace (where its administrator is published, and where the Jobs run),
+# organization_msp_id, ordering_service_name, channel_name.
+#
+# Each organization runs the steps it is in charge of. A step runs when its
+# variable is not empty.
+
+# Ordering organization: the organizations to add to the consortium.
+consortium_organizations: []
+consortium: SampleConsortium
+system_channel: testchainid
+
+# One member organization: create channel_name with these organizations.
+channel_organizations: []
+# channel_policies: policies of the Application group (see the k8s_channel module).
+channel_capabilities: {}
+
+# Each member organization: its peers to join, and its anchor peers.
+join_peers: []
+anchor_peers: []
+# anchor_port: the port of the anchor peers, instead of the port published by the console.
+
+# k8s_jobs: options of the Kubernetes Jobs (see the k8s_* modules): kubeconfig,
+# context, images, image_pull_policy, image_pull_secrets, host_aliases,
+# job_timeout, name_prefix.
+k8s_jobs: {}

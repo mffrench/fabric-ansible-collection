@@ -70,3 +70,24 @@
       name: "{{ peer_name }}{{ item }}"
   loop: "{{ range(1, peers + 1, 1) | list }}"
   when: peers > 1
+
+- name: Delete the organization admin and certificates published in Kubernetes
+  kubernetes.core.k8s:
+      state: absent
+      namespace: "{{ namespace }}"
+      kubeconfig: "{{ k8s_jobs.kubeconfig | default(omit) }}"
+      context: "{{ k8s_jobs.context | default(omit) }}"
+      api_version: "{{ item.api_version | default('v1') }}"
+      kind: "{{ item.kind }}"
+      name: "{{ item.name }}"
+  loop:
+      - {kind: Secret, name: "{{ k8s_jobs.name_prefix | default(namespace) }}-admin-key"}
+      - {kind: ConfigMap, name: "{{ k8s_jobs.name_prefix | default(namespace) }}-admin-cert"}
+      - {kind: ConfigMap, name: "{{ k8s_jobs.name_prefix | default(namespace) }}-ca-certs"}
+      # The service account of the Job, unless it is managed elsewhere (manage_service_account: false).
+      - {kind: RoleBinding, api_version: rbac.authorization.k8s.io/v1, name: "{{ k8s_jobs.service_account | default('fac-identity-bootstrap') }}", account: true}
+      - {kind: Role, api_version: rbac.authorization.k8s.io/v1, name: "{{ k8s_jobs.service_account | default('fac-identity-bootstrap') }}", account: true}
+      - {kind: ServiceAccount, name: "{{ k8s_jobs.service_account | default('fac-identity-bootstrap') }}", account: true}
+  loop_control:
+      label: "{{ item.kind }}/{{ item.name }}"
+  when: not expose_ca | bool and (not item.account | default(false) or k8s_jobs.manage_service_account | default(true))

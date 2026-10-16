@@ -1,0 +1,88 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+- name: Fail if a required variable is not specified
+  fail:
+      msg: "{{ item }} not specified or is empty"
+  when: lookup('vars', item, default='') in ['', None, [], {}]
+  loop:
+      - namespace
+      - organization_msp_id
+      - ordering_service_name
+      - channel_name
+      - chaincode_name
+      - chaincode_version
+      - chaincode_image
+      - chaincode_peers
+
+- name: Name the chaincode server after the chaincode and its version
+  set_fact:
+      # mycc 1.0 -> mycc-v1-0, a DNS label (the Service name the peers dial).
+      k8s_chaincode_server: "{{ (chaincode_name ~ '-v' ~ chaincode_version) | lower | regex_replace('[^a-z0-9-]', '-') | truncate(63, true, '') | regex_replace('-+$', '') }}"
+
+- name: Run the chaincode steps with Kubernetes Jobs
+  module_defaults:
+      hyperledger.fabric_ansible_collection.k8s_chaincode_install: &defaults
+          api_endpoint: "{{ api_endpoint | default(omit) }}"
+          api_authtype: "{{ api_authtype | default(omit) }}"
+          api_key: "{{ api_key | default(omit) }}"
+          api_secret: "{{ api_secret | default(omit) }}"
+          api_token_endpoint: "{{ api_token_endpoint | default(omit) }}"
+          api_timeout: "{{ api_timeout | default(omit) }}"
+          namespace: "{{ namespace }}"
+          kubeconfig: "{{ k8s_jobs.kubeconfig | default(omit) }}"
+          context: "{{ k8s_jobs.context | default(omit) }}"
+          images: "{{ k8s_jobs.images | default(omit) }}"
+          image_pull_policy: "{{ k8s_jobs.image_pull_policy | default(omit) }}"
+          image_pull_secrets: "{{ k8s_jobs.image_pull_secrets | default(omit) }}"
+          host_aliases: "{{ k8s_jobs.host_aliases | default(omit) }}"
+          job_timeout: "{{ k8s_jobs.job_timeout | default(omit) }}"
+          name_prefix: "{{ k8s_jobs.name_prefix | default(omit) }}"
+          msp_id: "{{ organization_msp_id }}"
+      hyperledger.fabric_ansible_collection.k8s_chaincode_approve: &definition
+          <<: *defaults
+          ordering_service: "{{ ordering_service_name }}"
+          channel: "{{ channel_name }}"
+          name: "{{ chaincode_name }}"
+          version: "{{ chaincode_version }}"
+          sequence: "{{ chaincode_sequence }}"
+          endorsement_policy: "{{ chaincode_endorsement_policy | default(omit) }}"
+          endorsement_policy_ref: "{{ chaincode_endorsement_policy_ref | default(omit) }}"
+          init_required: "{{ chaincode_init_required }}"
+      hyperledger.fabric_ansible_collection.k8s_chaincode_commit: *definition
+  block:
+      - name: Build the package of the chaincode
+        hyperledger.fabric_ansible_collection.ccaas_package:
+            label: "{{ chaincode_name }}_{{ chaincode_version }}"
+            address: "{{ k8s_chaincode_server }}:{{ chaincode_port }}"
+            path: "{{ chaincode_package_dir }}/{{ chaincode_name }}_{{ chaincode_version }}.tgz"
+        register: k8s_chaincode_package
+
+      - name: Install the package on the peers
+        hyperledger.fabric_ansible_collection.k8s_chaincode_install:
+            peers: "{{ chaincode_peers }}"
+            path: "{{ k8s_chaincode_package.path }}"
+        register: k8s_chaincode_install
+
+      - name: Run the chaincode server
+        kubernetes.core.k8s:
+            state: present
+            kubeconfig: "{{ k8s_jobs.kubeconfig | default(omit) }}"
+            context: "{{ k8s_jobs.context | default(omit) }}"
+            definition: "{{ lookup('template', 'ccaas.yaml.j2') | from_yaml_all | list }}"
+            # Waits for the Deployment to be available.
+            wait: true
+            wait_timeout: "{{ k8s_jobs.job_timeout | default(300) }}"
+
+      - name: Approve the chaincode definition for the organization
+        hyperledger.fabric_ansible_collection.k8s_chaincode_approve:
+            peer: "{{ chaincode_peers[0] }}"
+            package_id: "{{ k8s_chaincode_install.package_id }}"
+        when: chaincode_approve | bool
+
+      - name: Commit the chaincode definition
+        hyperledger.fabric_ansible_collection.k8s_chaincode_commit:
+            peers: "{{ chaincode_peers[:1] }}"
+            endorsing_peers: "{{ chaincode_endorsing_peers }}"
+        when: chaincode_commit | bool

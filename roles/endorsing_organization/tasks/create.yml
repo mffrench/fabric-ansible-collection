@@ -42,6 +42,11 @@
       msg: number of zones does not match the number of peers
   when: peer_zones is defined and (peer_zones | length != peers)
 
+- name: Fail if namespace not specified for the components that are not exposed
+  fail:
+      msg: namespace not specified or is empty, it is required when expose_ca or expose_peer is false
+  when: (not expose_ca | bool or not expose_peer | bool) and not namespace
+
 - name: Create certificate authority
   hyperledger.fabric_ansible_collection.certificate_authority:
       state: "{{ state }}"
@@ -74,6 +79,8 @@
       version: "{{ ca_version | default(omit) }}"
       zone: "{{ ca_zone | default(omit) }}"
       wait_timeout: "{{ wait_timeout | default(omit) }}"
+      wait_mode: "{{ 'operations' if expose_ca | bool else 'none' }}"
+  register: endorsing_organization_ca
 
 - name: Enroll certificate authority admin
   hyperledger.fabric_ansible_collection.enrolled_identity:
@@ -89,6 +96,7 @@
       enrollment_id: "{{ ca_admin_enrollment_id }}"
       enrollment_secret: "{{ ca_admin_enrollment_secret }}"
       path: "{{ ca_admin_identity }}"
+  when: expose_ca | bool
 
 - name: Register the organization admin
   hyperledger.fabric_ansible_collection.registered_identity:
@@ -105,6 +113,7 @@
       enrollment_secret: "{{ organization_admin_enrollment_secret }}"
       max_enrollments: -1
       type: admin
+  when: expose_ca | bool
 
 - name: Register the peer
   hyperledger.fabric_ansible_collection.registered_identity:
@@ -121,6 +130,7 @@
       enrollment_secret: "{{ peer_enrollment_secret }}"
       max_enrollments: -1
       type: peer
+  when: expose_ca | bool
 
 - name: Enroll the organization admin
   hyperledger.fabric_ansible_collection.enrolled_identity:
@@ -137,6 +147,12 @@
       enrollment_secret: "{{ organization_admin_enrollment_secret }}"
       path: "{{ organization_admin_identity }}"
   register: endorsing_organization_org_admin
+  when: expose_ca | bool
+
+# Registers endorsing_organization_org_admin, as the task above.
+- name: Register and enroll the identities in Kubernetes
+  include_tasks: k8s/identities.yml
+  when: not expose_ca | bool
 
 - name: Create organization
   hyperledger.fabric_ansible_collection.organization:
@@ -149,8 +165,12 @@
       api_timeout: "{{ api_timeout | default(omit) }}"
       name: "{{ organization_name }}"
       msp_id: "{{ organization_msp_id }}"
-      certificate_authority: "{{ ca_name }}"
-      registrar: "{{ ca_admin_identity }}"
+      certificate_authority: "{{ ca_name if expose_ca | bool else omit }}"
+      registrar: "{{ ca_admin_identity if expose_ca | bool else omit }}"
+      root_certs: "{{ omit if expose_ca | bool else endorsing_organization_org_admin.root_certs }}"
+      intermediate_certs: "{{ omit if expose_ca | bool else endorsing_organization_org_admin.intermediate_certs }}"
+      tls_root_certs: "{{ omit if expose_ca | bool else endorsing_organization_org_admin.tls_root_certs }}"
+      tls_intermediate_certs: "{{ omit if expose_ca | bool else endorsing_organization_org_admin.tls_intermediate_certs }}"
       admins:
           - "{{ endorsing_organization_org_admin.enrolled_identity.cert | default(omit) }}"
 
@@ -176,6 +196,7 @@
       version: "{{ peer_version | default(omit) }}"
       zone: "{{ peer_zones[0] | default(omit) }}"
       wait_timeout: "{{ wait_timeout | default(omit) }}"
+      wait_mode: "{{ 'operations' if expose_peer | bool else 'none' }}"
   when: peers == 1
 
 - name: Create multiple peers
@@ -200,7 +221,17 @@
       version: "{{ peer_version | default(omit) }}"
       zone: "{{ peer_zones[peer_idx] | default(omit) }}"
       wait_timeout: "{{ wait_timeout | default(omit) }}"
+      wait_mode: "{{ 'operations' if expose_peer | bool else 'none' }}"
   loop: "{{ range(1, peers + 1, 1) | list }}"
   loop_control:
       index_var: peer_idx
   when: peers > 1
+
+- name: Wait for the peers in Kubernetes
+  hyperledger.fabric_ansible_collection.k8s_component_ready:
+      namespace: "{{ namespace }}"
+      kubeconfig: "{{ k8s_jobs.kubeconfig | default(omit) }}"
+      context: "{{ k8s_jobs.context | default(omit) }}"
+      components: "{{ [peer_name] if peers == 1 else [peer_name] | product(range(1, peers + 1)) | map('join') | list }}"
+      timeout: "{{ k8s_wait_timeout }}"
+  when: not expose_peer | bool

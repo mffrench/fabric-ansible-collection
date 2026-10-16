@@ -1,0 +1,66 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+- name: Fail if a required variable is not specified
+  fail:
+      msg: "{{ item }} not specified or is empty"
+  when: lookup('vars', item, default='') in ['', None, [], {}]
+  loop:
+      - namespace
+      - organization_msp_id
+      - ordering_service_name
+      - channel_name
+
+- name: Run the channel steps with Kubernetes Jobs
+  module_defaults:
+      hyperledger.fabric_ansible_collection.k8s_consortium_members: &defaults
+          api_endpoint: "{{ api_endpoint | default(omit) }}"
+          api_authtype: "{{ api_authtype | default(omit) }}"
+          api_key: "{{ api_key | default(omit) }}"
+          api_secret: "{{ api_secret | default(omit) }}"
+          api_token_endpoint: "{{ api_token_endpoint | default(omit) }}"
+          api_timeout: "{{ api_timeout | default(omit) }}"
+          namespace: "{{ namespace }}"
+          kubeconfig: "{{ k8s_jobs.kubeconfig | default(omit) }}"
+          context: "{{ k8s_jobs.context | default(omit) }}"
+          images: "{{ k8s_jobs.images | default(omit) }}"
+          image_pull_policy: "{{ k8s_jobs.image_pull_policy | default(omit) }}"
+          image_pull_secrets: "{{ k8s_jobs.image_pull_secrets | default(omit) }}"
+          host_aliases: "{{ k8s_jobs.host_aliases | default(omit) }}"
+          job_timeout: "{{ k8s_jobs.job_timeout | default(omit) }}"
+          name_prefix: "{{ k8s_jobs.name_prefix | default(omit) }}"
+          msp_id: "{{ organization_msp_id }}"
+          ordering_service: "{{ ordering_service_name }}"
+      hyperledger.fabric_ansible_collection.k8s_channel: *defaults
+      hyperledger.fabric_ansible_collection.k8s_channel_join: *defaults
+      hyperledger.fabric_ansible_collection.k8s_anchor_peers: *defaults
+  block:
+      - name: Add the organizations to the consortium
+        hyperledger.fabric_ansible_collection.k8s_consortium_members:
+            organizations: "{{ consortium_organizations }}"
+            consortium: "{{ consortium }}"
+            system_channel: "{{ system_channel }}"
+        when: consortium_organizations | length > 0
+
+      - name: Create the channel
+        hyperledger.fabric_ansible_collection.k8s_channel:
+            name: "{{ channel_name }}"
+            organizations: "{{ channel_organizations }}"
+            policies: "{{ channel_policies | default(omit) }}"
+            capabilities: "{{ channel_capabilities }}"
+            consortium: "{{ consortium }}"
+        when: channel_organizations | length > 0
+
+      - name: Join the peers to the channel
+        hyperledger.fabric_ansible_collection.k8s_channel_join:
+            channel: "{{ channel_name }}"
+            peers: "{{ join_peers }}"
+        when: join_peers | length > 0
+
+      - name: Set the anchor peers
+        hyperledger.fabric_ansible_collection.k8s_anchor_peers:
+            channel: "{{ channel_name }}"
+            peers: "{{ anchor_peers }}"
+            anchor_port: "{{ anchor_port | default(omit) }}"
+        when: anchor_peers | length > 0
