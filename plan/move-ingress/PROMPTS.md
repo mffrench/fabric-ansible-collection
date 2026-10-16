@@ -514,4 +514,53 @@ As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md, a service por
 
 A few adjustments are needed for it to work end to end. In particular, every endpoint needs its own 443 Service. Each node advertises several endpoints on 443: API, operations, grpcweb, and admin on orderers. With your CoreDNS rewrites, -operations and the other hostnames still resolve to the same Service. There, 443 would reach the API port rather than operations (9443 on peers and CAs, 8443 on orderers), grpcweb (7443) or orderer admin (9443). That would break the console's status checks and grpcweb proxy, the collection's health waits, and joining orderers to channels. A Service port can map 443 to only one target, so this approach requires creating one Service per endpoint type, each with a matching CoreDNS rewrite. That also avoids modifying operator-managed objects.
 
-Fix @plan/move-ingress/MIGRATION-STEP-1.md plan to create one service per endpoint type.
+
+## Fix review step 1 Implementation mistakes part Variables and facts, **`cluster_domain` discovery:**
+
+As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md in Implementation mistakes (fixable without changing the design)
+
+fix in the plan @plan/move-ingress/MIGRATION-STEP-1.md by removing discovery via kubectl exec ... awk
+
+## Fix review step 1 Implementation mistakes part Organization roles
+
+As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md in Implementation mistakes (fixable without changing the design)
+fix Organization roles
+
+
+## Fix review step 1 Implementation mistakes part Variables and facts, **Cluster-local `ingress_domain`
+
+As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md in Implementation mistakes (fixable without changing the design)
+
+
+## Fix review step 1 Implementation mistakes part Console
+
+As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md in Implementation mistakes (fixable without changing the design)
+
+`uri http://<console>.<ns>.svc.cluster.local:3000` runs on the Ansible control node, which cannot resolve in-cluster names. → Check the Deployment readiness via `k8s_info`.
+
+fix in the plan @plan/move-ingress/MIGRATION-STEP-1.md
+
+## Fix review step 1 Implementation mistakes part Console, URL and role
+
+As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md in Implementation mistakes (fixable without changing the design)
+
+Hardcoded `cluster.local`, the `http :3000` protocol / port needs checking
+`roles/fabric_console/tasks/k8s/create.yml` does not wait for any Ingress
+
+fix in the plan @plan/move-ingress/MIGRATION-STEP-1.md sub-tasks 1.3 and 1.6 by using the console HTTPS port and the /health path with the cluster domain from cluster_domain, and by applying the wait logic to the tutorial 00-deploy-fabric-console.yml used by CI
+
+## Fix review step 1 Implementation mistakes part Expose-none CI
+
+As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md in Implementation mistakes (fixable without changing the design)
+
+fix in the plan @plan/move-ingress/MIGRATION-STEP-1.md expose non ci part
+
+
+## Fix review step 1 Documentation inconsistencies
+
+As reviewed in @plan/move-ingress/REVIEW-MIGRATION-PLAN-STEP-1.md in Documentation inconsistencies
+
+RBAC routes are created by Ansible tasks, not by the operator extending the operator cluster role is not necessary
+also fix 1.3 unconsistent block size
+
+fix in the plan @plan/move-ingress/MIGRATION-STEP-1.md
