@@ -1,0 +1,16 @@
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Read kube-system/coredns with the ServiceAccount token
+      kubernetes.core.k8s_info: {api_version: v1, kind: ConfigMap, namespace: kube-system, name: coredns}
+      register: cm
+    - name: Console health through console_incluster_url
+      ansible.builtin.uri:
+        url: https://hlf-console.default.svc.cluster.local:3000/ak/api/v3/health
+        url_username: admin@example.com
+        url_password: password
+        force_basic_auth: true
+        validate_certs: false
+      register: health
+    - ansible.builtin.debug:
+        msg: "coredns ConfigMap read={{ cm.resources | length == 1 }} console health={{ health.status }}"

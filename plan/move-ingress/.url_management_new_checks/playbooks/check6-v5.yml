@@ -1,0 +1,23 @@
+- hosts: localhost
+  gather_facts: false
+  vars:
+    cases:
+      - {d: default.svc.cluster.local, u: "https://default-check1-ca.default.svc.cluster.local:443", want: true,  why: "CA api (real, from console)"}
+      - {d: default.svc.cluster.local, u: "https://default-check1-operations.default.svc.cluster.local:443", want: true, why: "CA operations (real)"}
+      - {d: default.svc.cluster.local, u: "grpcs://default-org1peer-peer.default.svc.cluster.local:443", want: true, why: "peer grpcs"}
+      - {d: default.svc.cluster.local, u: "https://default-osnode1-admin.default.svc.cluster.local:443", want: true, why: "orderer admin"}
+      - {d: default.svc.cluster.local, u: "", want: skip, why: "osnadmin_url empty (Fabric < 2.4.1)"}
+      - {d: default.svc.cluster.local, u: "https://default-check1-ca.127-0-0-1.nip.io:443", want: false, why: "console on another domain"}
+      - {d: default.svc.cluster.local, u: "https://other-check1-ca.other.svc.cluster.local:443", want: false, why: "k8s_namespace != console namespace"}
+      - {d: 127-0-0-1.nip.io, u: "https://default-check1-ca.127-0-0-1.nip.io:443", want: true, why: "legacy mode (scenario A)"}
+      - {d: 127-0-0-1.nip.io, u: "https://default-check1-ca.x127-0-0-1.nip.io:443", want: false, why: "suffix trap (no dot boundary)"}
+      - {d: cluster.local, u: "https://default-check1-ca.default.svc.cluster.local:443", want: false, why: "must compare hlf_node_domain, not hlf_network_domain"}
+  tasks:
+    - ansible.builtin.debug:
+        msg: >-
+          {{ '%-5s' | format(res) }} {{ 'OK ' if (res|string == item.want|string) else 'BAD' }} {{ item.why }}
+      vars:
+        res: >-
+          {{ 'skip' if (item.u | length == 0) else ((item.u | urlsplit('hostname')).endswith('.' ~ item.d)) }}
+      loop: "{{ cases }}"
+      loop_control: { label: "{{ item.why }}" }

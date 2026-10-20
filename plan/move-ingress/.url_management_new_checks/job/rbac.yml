@@ -1,0 +1,42 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: ansible-runner, namespace: default}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ansible-runner, namespace: default}
+rules:
+  # Per-endpoint Services (sub-task 1.3b)
+  - apiGroups: [""]
+    resources: [services]
+    verbs: [get, list, create, patch, update, delete]
+  # Node CRs: read for checks, patch for neutralize_node_ingresses (sub-task 1.3c)
+  - apiGroups: [ibp.com]
+    resources: [ibpcas, ibppeers, ibporderers]
+    verbs: [get, list, patch]
+  # Wait for the Ingress class after neutralization (sub-task 1.3c)
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ansible-runner, namespace: default}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ansible-runner}
+subjects: [{kind: ServiceAccount, name: ansible-runner, namespace: default}]
+---
+# cluster_domain lookup (sub-task 1.1): read only the coredns ConfigMap
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ansible-runner-coredns, namespace: kube-system}
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [coredns]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ansible-runner-coredns, namespace: kube-system}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ansible-runner-coredns}
+subjects: [{kind: ServiceAccount, name: ansible-runner, namespace: default}]

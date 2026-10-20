@@ -1,0 +1,51 @@
+---
+- name: Read the CoreDNS Corefile to discover the cluster domain
+  kubernetes.core.k8s_info:
+    api_version: v1
+    kind: ConfigMap
+    namespace: kube-system
+    name: coredns
+  register: _nd_coredns_cm
+  failed_when: false   # missing ConfigMap or RBAC denial handled below
+
+- name: Normalise the user and discovered cluster domains
+  ansible.builtin.set_fact:
+    _nd_user_cd: "{{ cluster_domain | default('', true) | lower | regex_replace('\\.$', '') }}"
+    _nd_found_cd: >-
+      {{ (_nd_coredns_cm.resources | default([]) | first | default({}))
+           .get('data', {}).get('Corefile', '')
+         | regex_findall('(?m)^\s*kubernetes\s+([^{\n]+)')
+         | map('split') | flatten
+         | reject('search', '\.arpa\.?$')
+         | map('lower') | map('regex_replace', '\.$', '')
+         | first | default('') }}
+    _nd_cd_error: "{{ _nd_coredns_cm.msg | default('no kubernetes plugin line in the Corefile') }}"
+
+- name: Fail when the user cluster_domain contradicts the cluster
+  ansible.builtin.fail:
+    msg: >-
+      cluster_domain='{{ _nd_user_cd }}' does not match the cluster domain
+      '{{ _nd_found_cd }}' declared in the kube-system/coredns ConfigMap. Set
+      cluster_domain to '{{ _nd_found_cd }}', or remove it from your vars file.
+  when: [_nd_found_cd != '', _nd_user_cd != '', _nd_user_cd != _nd_found_cd]
+
+- name: Fail when the cluster domain is neither set nor discoverable
+  ansible.builtin.fail:
+    msg: >-
+      Could not read the cluster domain from the kube-system/coredns ConfigMap
+      ({{ _nd_cd_error }}). Set cluster_domain explicitly in your vars file
+      (usually 'cluster.local'; check with your cluster administrator or the
+      kubelet --cluster-domain setting).
+  when: [_nd_found_cd == '', _nd_user_cd == '']
+
+- name: Warn that the user cluster_domain could not be verified
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: could not read the cluster domain from the kube-system/coredns
+      ConfigMap ({{ _nd_cd_error }}). Trusting cluster_domain='{{ _nd_user_cd }}'
+      as supplied.
+  when: [_nd_found_cd == '', _nd_user_cd != '']
+
+- name: Set the effective cluster domain
+  ansible.builtin.set_fact:
+    network_domains_cluster_domain: "{{ _nd_found_cd or _nd_user_cd }}"

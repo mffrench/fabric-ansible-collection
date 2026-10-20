@@ -20,4 +20,5 @@ smart_contract_package: "fabcar@1.0.0.tgz"
 # smart_contract_collections_file: ""
 ca_version: ">=1.4,<2.0"
 peer_version: ">=2.2,<3.0"
+peer_state_db: leveldb
 ordering_service_version: ">=2.2,<3.0"
