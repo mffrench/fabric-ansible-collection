@@ -226,6 +226,43 @@ Parameters
     | **Type**: int
     | **Default value**: ``60``
 
+  expose_ca
+    Kubernetes only. Whether the certificate authority is reachable from the Ansible host.
+
+    When ``false``, the role never calls the certificate authority from the Ansible host. It waits for it through the Kubernetes API (module ``k8s_component_ready``), then registers the identities and enrolls the organization administrator in a Kubernetes Job (module ``k8s_identity_bootstrap``). The private key of the administrator stays in the cluster, in the Secret ``<namespace>-admin-key``, and no identity file is written in the *wallet*. The other ``k8s_*`` modules sign with this administrator.
+
+    The URL of the certificate authority published by the console must resolve in the cluster.
+
+    | **Type**: bool
+    | **Default value**: ``true``
+
+  expose_peer
+    Kubernetes only. Whether the peers are reachable from the Ansible host.
+
+    When ``false``, the role waits for the peers through the Kubernetes API (module ``k8s_component_ready``) instead of calling their operations URL.
+
+    | **Type**: bool
+    | **Default value**: ``true``
+
+  namespace
+    The Kubernetes namespace of the console and of the components it creates.
+
+    Required when *expose_ca* or *expose_peer* is ``false``.
+
+    | **Type**: str
+
+  k8s_jobs
+    Options of the Kubernetes Jobs and API calls, when a component is not exposed: ``kubeconfig``, ``context``, ``images``, ``image_pull_policy``, ``image_pull_secrets``, ``host_aliases``, ``job_timeout``, ``ca_url``, ``name_prefix``, ``service_account``, ``manage_service_account``. See the ``k8s_identity_bootstrap`` module.
+
+    | **Type**: dict
+    | **Default value**: ``{}``
+
+  k8s_wait_timeout
+    The timeout, in seconds, to wait for a component that is not exposed.
+
+    | **Type**: int
+    | **Default value**: ``600``
+
 Examples
 --------
 
@@ -247,6 +284,27 @@ Examples
       peer_enrollment_id: org1peer
       peer_enrollment_secret: org1peerpw
       wait_timeout: 3600
+    roles:
+      - hyperledger.fabric_ansible_collection.endorsing_organization
+
+  - name: Create components that are not exposed outside of the Kubernetes cluster
+    vars:
+      state: present
+      api_endpoint: https://ibm-hlfsupport-console.example.org:32000
+      api_authtype: basic
+      api_key: xxxxxxxx
+      api_secret: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+      organization_name: Org1
+      organization_msp_id: Org1MSP
+      ca_admin_enrollment_id: admin
+      ca_admin_enrollment_secret: adminpw
+      organization_admin_enrollment_id: org1admin
+      organization_admin_enrollment_secret: org1adminpw
+      peer_enrollment_id: org1peer
+      peer_enrollment_secret: org1peerpw
+      expose_ca: false
+      expose_peer: false
+      namespace: org1
     roles:
       - hyperledger.fabric_ansible_collection.endorsing_organization
 

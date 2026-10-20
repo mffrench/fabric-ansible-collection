@@ -177,6 +177,17 @@ options:
             - The timeout, in seconds, to wait until the certificate authority is available.
         type: int
         default: 60
+    wait_mode:
+        description:
+            - How to wait until the certificate authority is available.
+            - C(operations) calls the operations URL (C(/healthz)) of the certificate authority from the Ansible host.
+            - C(none) does not wait. Use it when the certificate authority is not exposed outside of the Kubernetes
+              cluster, then wait with the M(k8s_component_ready) module.
+        type: str
+        default: operations
+        choices:
+            - operations
+            - none
 notes: []
 requirements: []
 '''
@@ -369,7 +380,8 @@ def main():
         zone=dict(type='str'),
         replicas=dict(type='int'),
         version=dict(type='str'),
-        wait_timeout=dict(type='int', default=60)
+        wait_timeout=dict(type='int', default=60),
+        wait_mode=dict(type='str', default='operations', choices=['operations', 'none'])
     )
     required_if = [
         ('api_authtype', 'basic', ['api_secret'])
@@ -626,8 +638,9 @@ def main():
 
         # Wait for the certificate authority to start.
         certificate_authority = CertificateAuthority.from_json(console.extract_ca_info(certificate_authority))
-        timeout = module.params['wait_timeout']
-        certificate_authority.wait_for(timeout)
+        if module.params['wait_mode'] == 'operations':
+            timeout = module.params['wait_timeout']
+            certificate_authority.wait_for(timeout)
 
         # Return the certificate authority.
         module.exit_json(changed=changed, certificate_authority=certificate_authority.to_json())

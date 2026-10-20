@@ -242,6 +242,17 @@ options:
             - The timeout, in seconds, to wait until the ordering service is available.
         type: int
         default: 60
+    wait_mode:
+        description:
+            - How to wait until the ordering service is available.
+            - C(operations) calls the operations URL (C(/healthz)) of the ordering service from the Ansible host.
+            - C(none) does not wait. Use it when the ordering service is not exposed outside of the Kubernetes
+              cluster, then wait with the M(k8s_component_ready) module.
+        type: str
+        default: operations
+        choices:
+            - operations
+            - none
 notes: []
 requirements: []
 '''
@@ -542,7 +553,8 @@ def main():
         )),
         zones=dict(type='list', elements='str', aliases=['zone']),
         version=dict(type='str'),
-        wait_timeout=dict(type='int', default=60)
+        wait_timeout=dict(type='int', default=60),
+        wait_mode=dict(type='str', default='operations', choices=['operations', 'none'])
     )
     required_if = [
         ('api_authtype', 'basic', ['api_secret']),
@@ -731,8 +743,9 @@ def main():
 
         # Wait for the ordering service to start.
         ordering_service = OrderingService.from_json(console.extract_ordering_service_info(ordering_service))
-        timeout = module.params['wait_timeout']
-        ordering_service.wait_for(timeout)
+        if module.params['wait_mode'] == 'operations':
+            timeout = module.params['wait_timeout']
+            ordering_service.wait_for(timeout)
 
         # Return the ordering service.
         module.exit_json(changed=changed, ordering_service=ordering_service.to_json())

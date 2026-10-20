@@ -1,0 +1,35 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# The organization that signs, and the components, all from its console:
+# api_endpoint, api_authtype, api_key, api_secret, api_token_endpoint, api_timeout,
+# namespace (where its administrator is published, where the Jobs and the
+# chaincode server run), organization_msp_id, ordering_service_name, channel_name.
+
+# The chaincode, run as a service (CCaaS): chaincode_name, chaincode_version,
+# chaincode_image (the image of the chaincode server).
+chaincode_sequence: 1
+chaincode_port: 9999
+chaincode_image_pull_policy: IfNotPresent
+chaincode_resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 300m, memory: 256Mi}
+# chaincode_endorsement_policy or chaincode_endorsement_policy_ref: see the k8s_chaincode_approve module.
+chaincode_init_required: false
+# The directory of the package built on the Ansible host.
+chaincode_package_dir: "{{ playbook_dir }}"
+
+# The peers of the organization that run the chaincode.
+chaincode_peers: []
+chaincode_approve: true
+# One organization commits, with a peer of each organization the lifecycle
+# endorsement policy needs: its own chaincode_peers, and chaincode_endorsing_peers
+# (address, and organization or tls_root_cert, see the k8s_chaincode_commit module).
+chaincode_commit: false
+chaincode_endorsing_peers: []
+
+# k8s_jobs: options of the Kubernetes Jobs (see the k8s_* modules): kubeconfig,
+# context, images, image_pull_policy, image_pull_secrets, host_aliases,
+# job_timeout, name_prefix.
+k8s_jobs: {}

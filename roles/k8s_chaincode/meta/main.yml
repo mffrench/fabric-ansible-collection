@@ -1,0 +1,14 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+galaxy_info:
+  author: Hyperledger Fabric Ansible Collection contributors
+  description: Ansible role for deploying a chaincode as a service (package, install, server, approve, commit) with Kubernetes Jobs, for components that are not exposed
+  license: Apache-2.0
+  platforms:
+    - name: GenericLinux
+      versions:
+        - all
+  galaxy_tags: []
+  min_ansible_version: "2.9"

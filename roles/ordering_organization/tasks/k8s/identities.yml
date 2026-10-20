@@ -1,0 +1,45 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# The certificate authority is not exposed: the identities are registered and
+# the organization admin is enrolled by a Kubernetes Job, in its namespace.
+- name: Wait for the certificate authority in Kubernetes
+  hyperledger.fabric_ansible_collection.k8s_component_ready:
+      namespace: "{{ namespace }}"
+      kubeconfig: "{{ k8s_jobs.kubeconfig | default(omit) }}"
+      context: "{{ k8s_jobs.context | default(omit) }}"
+      components:
+          - "{{ ca_name }}"
+      timeout: "{{ k8s_wait_timeout }}"
+
+- name: Register the identities and enroll the organization admin with a Kubernetes Job
+  hyperledger.fabric_ansible_collection.k8s_identity_bootstrap:
+      certificate_authority: "{{ ordering_organization_ca.certificate_authority }}"
+      namespace: "{{ namespace }}"
+      kubeconfig: "{{ k8s_jobs.kubeconfig | default(omit) }}"
+      context: "{{ k8s_jobs.context | default(omit) }}"
+      images: "{{ k8s_jobs.images | default(omit) }}"
+      image_pull_policy: "{{ k8s_jobs.image_pull_policy | default(omit) }}"
+      image_pull_secrets: "{{ k8s_jobs.image_pull_secrets | default(omit) }}"
+      host_aliases: "{{ k8s_jobs.host_aliases | default(omit) }}"
+      job_timeout: "{{ k8s_jobs.job_timeout | default(omit) }}"
+      ca_url: "{{ k8s_jobs.ca_url | default(omit) }}"
+      name_prefix: "{{ k8s_jobs.name_prefix | default(omit) }}"
+      service_account: "{{ k8s_jobs.service_account | default(omit) }}"
+      manage_service_account: "{{ k8s_jobs.manage_service_account | default(omit) }}"
+      registrar:
+          enrollment_id: "{{ ca_admin_enrollment_id }}"
+          enrollment_secret: "{{ ca_admin_enrollment_secret }}"
+      identities:
+          - enrollment_id: "{{ organization_admin_enrollment_id }}"
+            enrollment_secret: "{{ organization_admin_enrollment_secret }}"
+            type: admin
+          - enrollment_id: "{{ ordering_service_enrollment_id }}"
+            enrollment_secret: "{{ ordering_service_enrollment_secret }}"
+            type: orderer
+      admin:
+          name: "{{ organization_name }} Admin"
+          enrollment_id: "{{ organization_admin_enrollment_id }}"
+          enrollment_secret: "{{ organization_admin_enrollment_secret }}"
+  register: ordering_organization_org_admin

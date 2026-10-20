@@ -37,6 +37,11 @@
       msg: ordering_service_enrollment_secret not specified or is empty
   when: not ordering_service_enrollment_secret is defined or not ordering_service_enrollment_secret
 
+- name: Fail if namespace not specified for the components that are not exposed
+  fail:
+      msg: namespace not specified or is empty, it is required when expose_ca or expose_orderer is false
+  when: (not expose_ca | bool or not expose_orderer | bool) and not namespace
+
 - name: Create certificate authority
   hyperledger.fabric_ansible_collection.certificate_authority:
       state: "{{ state }}"
@@ -69,6 +74,8 @@
       version: "{{ ca_version | default(omit) }}"
       zone: "{{ ca_zone | default(omit) }}"
       wait_timeout: "{{ wait_timeout | default(omit) }}"
+      wait_mode: "{{ 'operations' if expose_ca | bool else 'none' }}"
+  register: ordering_organization_ca
 
 - name: Enroll certificate authority admin
   hyperledger.fabric_ansible_collection.enrolled_identity:
@@ -84,6 +91,7 @@
       enrollment_id: "{{ ca_admin_enrollment_id }}"
       enrollment_secret: "{{ ca_admin_enrollment_secret }}"
       path: "{{ ca_admin_identity }}"
+  when: expose_ca | bool
 
 - name: Register the organization admin
   hyperledger.fabric_ansible_collection.registered_identity:
@@ -100,6 +108,7 @@
       enrollment_secret: "{{ organization_admin_enrollment_secret }}"
       max_enrollments: -1
       type: admin
+  when: expose_ca | bool
 
 - name: Register the ordering service
   hyperledger.fabric_ansible_collection.registered_identity:
@@ -116,6 +125,7 @@
       enrollment_secret: "{{ ordering_service_enrollment_secret }}"
       max_enrollments: -1
       type: orderer
+  when: expose_ca | bool
 
 - name: Enroll the organization admin
   hyperledger.fabric_ansible_collection.enrolled_identity:
@@ -132,6 +142,12 @@
       enrollment_secret: "{{ organization_admin_enrollment_secret }}"
       path: "{{ organization_admin_identity }}"
   register: ordering_organization_org_admin
+  when: expose_ca | bool
+
+# Registers ordering_organization_org_admin, as the task above.
+- name: Register and enroll the identities in Kubernetes
+  include_tasks: k8s/identities.yml
+  when: not expose_ca | bool
 
 - name: Create organization
   hyperledger.fabric_ansible_collection.organization:
@@ -144,8 +160,12 @@
       api_timeout: "{{ api_timeout | default(omit) }}"
       name: "{{ organization_name }}"
       msp_id: "{{ organization_msp_id }}"
-      certificate_authority: "{{ ca_name }}"
-      registrar: "{{ ca_admin_identity }}"
+      certificate_authority: "{{ ca_name if expose_ca | bool else omit }}"
+      registrar: "{{ ca_admin_identity if expose_ca | bool else omit }}"
+      root_certs: "{{ omit if expose_ca | bool else ordering_organization_org_admin.root_certs }}"
+      intermediate_certs: "{{ omit if expose_ca | bool else ordering_organization_org_admin.intermediate_certs }}"
+      tls_root_certs: "{{ omit if expose_ca | bool else ordering_organization_org_admin.tls_root_certs }}"
+      tls_intermediate_certs: "{{ omit if expose_ca | bool else ordering_organization_org_admin.tls_intermediate_certs }}"
       admins:
           - "{{ ordering_organization_org_admin.enrolled_identity.cert | default(omit) }}"
 
@@ -171,3 +191,14 @@
       version: "{{ ordering_service_version | default(omit) }}"
       zones: "{{ ordering_service_zones | default(omit) }}"
       wait_timeout: "{{ wait_timeout | default(omit) }}"
+      wait_mode: "{{ 'operations' if expose_orderer | bool else 'none' }}"
+
+- name: Wait for the ordering service nodes in Kubernetes
+  hyperledger.fabric_ansible_collection.k8s_component_ready:
+      namespace: "{{ namespace }}"
+      kubeconfig: "{{ k8s_jobs.kubeconfig | default(omit) }}"
+      context: "{{ k8s_jobs.context | default(omit) }}"
+      # The operator names node N <ordering service>nodeN.
+      components: "{{ range(1, ordering_service_nodes + 1) | map('string') | map('regex_replace', '^', ordering_service_name ~ 'node') | list }}"
+      timeout: "{{ k8s_wait_timeout }}"
+  when: not expose_orderer | bool
