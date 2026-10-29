@@ -135,6 +135,8 @@ Replace ``<console_name>`` with your custom name for your HLF Console.
 
 Replace ``<console_domain>`` with the domain name of your Kubernetes cluster or Red Hat OpenShift cluster. This domain name is used as the base domain name for all ingress or routes created by the Hyperledger Fabric Open Source Stack.
 
+``console_domain`` is deprecated: its new name is ``exposed_domain``. See `Exposing everything with the nginx ingress controller <./nginx-expose-all.html>`_ for this variable and for the others that control what is exposed.
+
 Replace ``<console_email>`` with the email address of the Hyperledger Fabric Open Source Stack console user that will be created during the installation process. You will use this email address to access the Hyperledger Fabric Open Source Stack console after installation.
 
 Replace ``<console_default_password>`` with the default password for the Hyperledger Fabric Open Source Stack console. This default password will be set as the password for all new users, including the user created during the installation process.

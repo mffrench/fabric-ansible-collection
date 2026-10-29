@@ -29,7 +29,7 @@ A sub-task can need another one for three different reasons:
 | 1.8 CoreDNS rewrites | `.github/scripts/kind_with_nginx.sh` |
 | 1.9 CI legs and Job | `.github/workflows/fvtest.yml`; `.github/docker/ansible-runner/Dockerfile` (new); `.github/k8s/ansible-runner-{rbac,job}.yml` (new) |
 | 1.10 reachability assertions | `.github/scripts/verify-unexposed-reachability.sh` (new); `.github/workflows/fvtest.yml` (one step) |
-| 1.11 tutorial, everything exposed | `docs/source/tutorials/` (a section in `oss-installing.rst`, or a new page plus one line in `docs/source/index.rst`) |
+| 1.11 tutorial, everything exposed | `docs/source/tutorials/nginx-expose-all.rst` (new); `docs/source/tutorials/{oss,hlfsupport}-installing.rst` (a pointer paragraph each); `docs/source/index.rst` (one line); `plan/move-ingress/MIGRATION-STEP-1.md` (1.11 text only) |
 | 1.12 tutorial, nothing exposed | `docs/source/tutorials/nginx-no-expose.rst` (new); `docs/source/index.rst` (one line) |
 
 ## Files shared by several sub-tasks
@@ -43,7 +43,7 @@ These are the only places where two PRs can conflict:
 | `tutorial/00-deploy-fabric-console.yml` | 1.1, 1.3, 1.4, 1.5 | one after the other (1.4 needs 1.3; 1.2 and 1.11, in parallel with 1.3, don't touch it) |
 | console roles, `tasks/k8s/create.yml` | 1.4, 1.5 | one after the other |
 | `.github/workflows/fvtest.yml` | 1.2, 1.9, 1.10 | 1.2 early; 1.10 after 1.9 |
-| `docs/source/index.rst` | 1.11 (if new page), 1.12 | one toctree line each: trivial to rebase |
+| `docs/source/index.rst` | 1.11, 1.12 | one toctree line each: trivial to rebase |
 
 ## Dependencies per sub-task
 
@@ -59,7 +59,7 @@ These are the only places where two PRs can conflict:
 | 1.8 | — (script only, reads environment variables) | 1.6 (resolution checked against the Services) | — | 1.7, 1.5 (its code could even start with 1.6) |
 | 1.9 | 1.3 (`KEEP_NETWORK`, `RUN_TESTS_MODE`, `TEST_RUN_ID`) | 1.4 to 1.8 (B and C end to end) | 1.2, 1.10 | — |
 | 1.10 | — (new script) | 1.9 (network built by the Job) | 1.9 (`fvtest.yml`, merged before) | 1.12 |
-| 1.11 | 1.1 (the variables it documents) | — | 1.12 (`index.rst`, only with a new page) | everything from 1.2 on |
+| 1.11 | 1.1 (the variables it documents) | 1.5 (the page tells users to set `exposed_domain`; the console templates honour it from 1.5) | 1.12 (`index.rst`) | everything from 1.2 on, but merged after 1.5 |
 | 1.12 | — | 1.9 (scenario B runs in-cluster) | 1.11 (`index.rst`) | 1.10 |
 
 ```mermaid
@@ -67,6 +67,7 @@ flowchart LR
   s1["1.1"] --> s2["1.2"]
   s1 --> s3["1.3"]
   s1 --> s11["1.11"]
+  s5 -.-> s11
   s3 -.-> s4["1.4"]
   s4 --> s5["1.5"]
   s3 -.-> s6["1.6"]

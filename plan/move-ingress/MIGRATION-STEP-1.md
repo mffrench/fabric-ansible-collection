@@ -150,7 +150,7 @@ Commands the checks refer to by name:
 | [1.8](#subtask-1-8) | CoreDNS endpoint rewrites | C (A, B unchanged) | 1.6 |
 | [1.9](#subtask-1-9) | CI legs and in-cluster Job | A B C | 1.3 to 1.8 |
 | [1.10](#subtask-1-10) | Reachability assertions | B C | 1.9 |
-| [1.11](#subtask-1-11) | Tutorial: everything exposed | A | 1.1 |
+| [1.11](#subtask-1-11) | Tutorial: everything exposed | A | 1.1 (merge after 1.5) |
 | [1.12](#subtask-1-12) | Tutorial: nothing exposed | B | 1.9 |
 
 
@@ -2328,35 +2328,64 @@ for users.
 - Shows how to set these variables in a vars file (e.g. `common-vars.yml`) or
   via `ansible-playbook -e @vars.yml`.
 - Documents the existing `kubectl get ingress` verification steps.
-- `make -C docs html` builds without warnings.
+- `make -C docs` (the Makefile has no `html` target) builds without a new
+  warning: the build already has 211 warnings before this sub-task.
 
 **Todo list:**
-- [ ] Decide whether to add a new page or a section in the existing
-  `oss-installing.rst`; document the decision in the plan file.
-- [ ] Add a "Variables reference" table listing all `expose_*`,
-  `ingress_type`, domain variables, `unexposed_ingress_class` and
-  `neutralize_node_ingresses` with their defaults and effects (sub-task 1.1).
-- [ ] Add a verification step showing `kubectl get ingress -n <namespace>` output
-  when all services are exposed.
-- [ ] Run `make -C docs html` and fix any warnings.
+- [x] Decision: a **new page**, `docs/source/tutorials/nginx-expose-all.rst`,
+  plus one line in `docs/source/index.rst` and a short pointer in each
+  installation tutorial. The variables apply to both installation tutorials
+  (open source and IBM Support), so a section in `oss-installing.rst` would
+  have left the other one without it, and 1.12 adds a sibling page.
+- [x] Add a variables reference table: one row per key of
+  `roles/network_domains/defaults/main.yml` (21 keys), with its default and
+  its effect, plus a row for the deprecated `console_domain`. The four
+  `network_domains_*` inputs are listed as internal.
+- [x] Add a verification step showing `kubectl get ingress -n <namespace>` when
+  everything is exposed. The Ingress of an ordering node has four hosts
+  (`orderer`, `operations`, `grpcweb`, `admin`): the page lists all four.
+- [x] Build the docs and fix the warnings the page adds: none. The build has
+  211 warnings before this sub-task, all pre-existing (`autosectionlabel`
+  warns on every section title that two pages share). The page only uses
+  titles that appear nowhere else.
 
 **Relevant context:**
-- Files to update: `docs/source/tutorials/oss-installing.rst`,
-  `docs/source/tutorials/hlfsupport-installing.rst`.
-- Role reference files: `docs/source/roles/fabric-operator-crds.rst`,
-  `docs/source/roles/fabric-console.rst`.
+- Files: the new page, `docs/source/index.rst` (one toctree line) and, in
+  `oss-installing.rst` and `hlfsupport-installing.rst`, a paragraph after the
+  `<console_domain>` explanation that points to the page. The role reference
+  pages (`fabric-operator-crds.rst`, `fabric-console.rst`) are not changed:
+  they document `console_domain`, which still works.
+- **Merge this PR after 1.5.** The page tells users to set `exposed_domain`.
+  Until 1.5, the console templates read only `console_domain`, so a console
+  deployed with `exposed_domain` alone fails on an undefined variable.
+- `docs/Makefile` has no `html` target: `make -C docs` runs
+  `ansible-doc-extractor`, then `sphinx-build -b html`. A second run is
+  incremental and reports fewer warnings: run `make -C docs clean` first when
+  you compare two builds.
+- Section titles must be unique across the docs (`autosectionlabel`): not
+  "Before you start", "Running the playbook", "Parameters", and so on.
+- Step 2 of the check can be scripted: read the rows of the table, compare
+  each variable and default with `yq` on `defaults/main.yml`.
 
 ### ✋  check 1.11
 
 **Proves:** the page builds cleanly, its variable table matches the role,
 and its commands work as written.
 
-1. `make -C docs html 2>&1 | grep -iE 'warning|error'`: no output.
+1. A clean build adds no warning:
+   ```bash
+   make -C docs clean && make -C docs 2>&1 | grep -E 'WARNING|ERROR|build succeeded'
+   ```
+   Expected: the same `N warnings` as this command gives at `$BASE` (211 on
+   2026-10-27, all `duplicate label`), and no `WARNING` line naming a file of
+   this PR.
 2. Every key of `roles/network_domains/defaults/main.yml`
    (`yq 'keys' roles/network_domains/defaults/main.yml`) is in the page's
-   variables table, with the same default.
+   variables table, with the same default. `console_domain`, the deprecated
+   alias, is the only row without a key in the file.
 3. Someone who did not write the page follows it on a fresh KIND cluster,
-   copying the commands as written. Expected: the results the page shows,
+   copying the commands as written, on a build that includes 1.5 (it makes
+   the console honour `exposed_domain`). Expected: the results the page shows,
    including the `kubectl get ingress` output (class `nginx` everywhere).
 4. **Changed files vs the merge-conflict analysis.**
    ```bash
