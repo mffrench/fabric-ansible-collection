@@ -857,11 +857,17 @@ restarts. Hence:
   use `v1beta1`.
 - [ ] Add the "domain changed on an existing console" detection and restart.
   It reads the live `IBPConsole`, so it depends on the `apiVersion` fix above.
-- [ ] When `spec.deployer.domain` or `spec.ingress.class` is no longer
-  rendered but the live CR still has it (going back from B to A), remove it
-  explicitly (`null` in a merge patch). `kubernetes.core.k8s` with
-  `state: present` merges, so a field missing from the template stays on the
-  live CR.
+  Written once, in `roles/network_domains/tasks/console_domain_change.yml`,
+  and included right after the CR update by the four create paths of the
+  console roles and by `tutorial/00-deploy-fabric-console.yml` (which now
+  reads the live console too). The running console's node domain is
+  `spec.deployer.domain`, or `spec.networkinfo.domain` without it.
+- [x] ~~When `spec.deployer.domain` or `spec.ingress.class` is no longer
+  rendered, remove it explicitly.~~ **Not needed** (checked 2026-10-27): the
+  three create paths use `kubernetes.core.k8s` with `apply: true`
+  (`kubectl apply` semantics), which removes the fields of the last applied
+  configuration that the template no longer renders. Going back from B to A
+  in place left neither `deployer` nor `ingress` on the CR.
 - [ ] Render the templates for scenarios A and B with `ansible-playbook
   --check --diff` and compare with the examples above.
 
@@ -886,11 +892,15 @@ domain change restarts the console with a warning.
 
 1. **Before writing any code**, save today's console spec (scenario A):
    ```bash
-   kubectl get ibpconsole hlf-console -n "$NS" -o json | jq -S .spec > /tmp/console-spec-before.json
+   kubectl get ibpconsole hlf-console -n "$NS" -o json | jq -S '.spec | del(.connectionString, .password)' > /tmp/console-spec-before.json
    ```
+   `connectionString` (CouchDB credentials, generated anew for every console)
+   and `password` (removed by the operator once a new console is set up) are
+   managed by the operator, not by the template: they are left out, which
+   also keeps credentials off the screen.
 2. After the change: `ansible-lint`, **Rebuild**, **Fresh console**, then:
    ```bash
-   kubectl get ibpconsole hlf-console -n "$NS" -o json | jq -S .spec | diff /tmp/console-spec-before.json -
+   kubectl get ibpconsole hlf-console -n "$NS" -o json | jq -S '.spec | del(.connectionString, .password)' | diff /tmp/console-spec-before.json -
    ```
    Expected: no difference.
 3. `apiVersion` fix: `.github/scripts/deploy-console.sh` once more.
@@ -922,8 +932,10 @@ domain change restarts the console with a warning.
    (`kubectl get deploy hlf-console -n "$NS" -o jsonpath='{.spec.template.metadata.annotations}'`
    shows `kubectl.kubernetes.io/restartedAt`); `deployer.domain` is now
    `fabric.example.com`.
-7. Back to A: **Fresh console**, then step 2's `diff` is empty again (no
-   `deployer` or `ingress` field left behind).
+7. Back to A, first **in place** (`.github/scripts/deploy-console.sh` with no
+   variable, without undeploying): the F1 warning shows again, and step 2's
+   `diff` is empty (no `deployer` or `ingress` field left behind). Then with a
+   **Fresh console**: step 2's `diff` is empty again.
 8. **Regression run**: exit 0.
 9. **Changed files vs the merge-conflict analysis.**
    ```bash

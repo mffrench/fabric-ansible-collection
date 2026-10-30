@@ -86,7 +86,7 @@
 - name: Determine if console exists
   kubernetes.core.k8s_info:
     namespace: "{{ namespace }}"
-    api_version: "ibp.com/v1alpha2"
+    api_version: "ibp.com/v1beta1"
     kind: IBPConsole
     name: "{{ console }}"
   register: existing_console
@@ -98,6 +98,15 @@
     resource_definition: "{{ lookup('template', 'k8s/console.yml.j2') }}"
     apply: yes
   register: create_console
+
+- name: Restart the console if its HLF node domain changed
+  include_role:
+    name: hyperledger.fabric_ansible_collection.network_domains
+    tasks_from: console_domain_change
+  vars:
+    network_domains_namespace: "{{ namespace }}"
+    network_domains_console_name: "{{ console }}"
+    network_domains_live_console: "{{ existing_console.resources | first | default({}) }}"
 
 - name: Delete console config maps if it is being modified or upgraded
   kubernetes.core.k8s:

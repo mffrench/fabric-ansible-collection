@@ -8,6 +8,7 @@
     - common-vars.yml
   vars:
     state: present
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
     target: "{{ k8s_target | default('k8s') }}"
     arch: "{{ console_arch | default('amd64') }}"
     namespace: "{{ k8s_namespace | default('default') }}"
@@ -44,12 +45,30 @@
     - hyperledger.fabric_ansible_collection.fabric_operator_crds
 
   tasks:
+    - name: Determine if console exists
+      kubernetes.core.k8s_info:
+        namespace: "{{ namespace }}"
+        api_version: ibp.com/v1beta1
+        kind: IBPConsole
+        name: "{{ console_name }}"
+      register: existing_console
+
     - name: Create or update Fabric Operations Console
       kubernetes.core.k8s:
         state: present
         namespace: "{{ namespace }}"
         apply: true
-        definition:
+        definition: "{{ _console | combine(_console_domains, recursive=true) }}"
+      vars:
+        # spec.deployer.domain and spec.ingress.class only when needed: with no
+        # new variable, the CR is the same as before (MIGRATION-STEP-1 sub-task 1.5).
+        _console_domains:
+          spec: >-
+            {{ ({'deployer': {'domain': hlf_node_domain}}
+                if hlf_node_domain != network_domains_exposed_domain else {})
+               | combine({'ingress': {'class': unexposed_ingress_class}}
+                         if not expose_console | bool else {}) }}
+        _console:
           apiVersion: ibp.com/v1beta1
           kind: IBPConsole
           metadata:
@@ -66,7 +85,7 @@
             imagePullSecrets:
               - "{{ image_pull_secret }}"
             networkinfo:
-              domain: "{{ console_domain }}"
+              domain: "{{ network_domains_exposed_domain }}"
             images:
               deployerImage: "{{ deployer_image }}"
               deployerTag: "{{ deployer_image_label }}"
@@ -128,6 +147,15 @@
                   cpu: 50m
                   ephemeral-storage: 100M
                   memory: 256Mi
+
+    - name: Restart the console if its HLF node domain changed
+      ansible.builtin.include_role:
+        name: hyperledger.fabric_ansible_collection.network_domains
+        tasks_from: console_domain_change
+      vars:
+        network_domains_namespace: "{{ namespace }}"
+        network_domains_console_name: "{{ console_name }}"
+        network_domains_live_console: "{{ existing_console.resources | first | default({}) }}"
 
     - name: Wait for console deployment to exist
       kubernetes.core.k8s_info:

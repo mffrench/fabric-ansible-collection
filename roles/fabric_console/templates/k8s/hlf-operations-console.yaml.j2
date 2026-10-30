@@ -15,7 +15,15 @@ spec:
   imagePullSecrets:
   - "{{ image_pull_secret }}"
   networkinfo:
-    domain: "{{ console_domain }}"
+    domain: "{{ network_domains_exposed_domain }}"
+{%+ if hlf_node_domain != network_domains_exposed_domain %}
+  deployer:
+    domain: "{{ hlf_node_domain }}"
+{% endif %}
+{%+ if not expose_console | bool %}
+  ingress:
+    class: "{{ unexposed_ingress_class }}"
+{% endif %}
   images:
     deployerImage: "{{deployer_image}}"
     deployerTag: "{{deployer_image_label}}"
@@ -31,8 +39,6 @@ spec:
   versions:
     {{ console_versions | to_nice_yaml(indent=2, width=1024) | indent(4, false) }}
 {% endif %}
-  networkinfo:
-    domain: "{{console_domain}}"
   storage:
     console:
       class: "{{ console_storage_class }}"
