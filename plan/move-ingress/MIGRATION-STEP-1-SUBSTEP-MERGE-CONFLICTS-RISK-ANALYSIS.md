@@ -26,7 +26,7 @@ A sub-task can need another one for three different reasons:
 | 1.5 `IBPConsole` fields | console templates (`roles/fabric_console/templates/`, `roles/hlfsupport_console/templates/`); console tasks `{k8s,openshift}/{create,delete}.yml` of both console roles; `tutorial/00-deploy-fabric-console.yml`; `roles/network_domains/tasks/console_domain_change.yml` (new, F1); `plan/move-ingress/MIGRATION-STEP-1.md` (1.5 text only) |
 | 1.6 per-endpoint Services | `roles/k8s_endpoint_services/` (new); `roles/endorsing_organization/tasks/{create,delete}.yml`; `roles/ordering_organization/tasks/{create,delete}.yml`; `docs/source/roles/k8s-endpoint-services.rst` (new page, listed by a glob: no index change); `plan/move-ingress/MIGRATION-STEP-1.md` (1.6 text only) |
 | 1.7 node Ingress neutralization | `roles/endorsing_organization/tasks/create.yml`; `roles/ordering_organization/tasks/create.yml`; `roles/k8s_endpoint_services/` (`tasks/neutralize_ingress.yml` new, `defaults/main.yml`); `docs/source/roles/k8s-endpoint-services.rst`; `plan/move-ingress/MIGRATION-STEP-1.md` (1.7 text only) |
-| 1.8 CoreDNS rewrites | `.github/scripts/kind_with_nginx.sh` |
+| 1.8 CoreDNS rewrites | `.github/scripts/kind_with_nginx.sh`; `plan/move-ingress/MIGRATION-STEP-1.md` (1.8 text only) |
 | 1.9 CI legs and Job | `.github/workflows/fvtest.yml`; `.github/docker/ansible-runner/Dockerfile` (new); `.github/k8s/ansible-runner-{rbac,job}.yml` (new) |
 | 1.10 reachability assertions | `.github/scripts/verify-unexposed-reachability.sh` (new); `.github/workflows/fvtest.yml` (one step) |
 | 1.11 tutorial, everything exposed | `docs/source/tutorials/` (a section in `oss-installing.rst`, or a new page plus one line in `docs/source/index.rst`) |

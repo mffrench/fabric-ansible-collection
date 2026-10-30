@@ -27,6 +27,10 @@ KIND_API_SERVER_PORT=${KIND_API_SERVER_PORT:-8888}
 CONTAINER_REGISTRY_NAME=${CONTAINER_REGISTRY_NAME:-kind-registry}
 CONTAINER_REGISTRY_ADDRESS=${CONTAINER_REGISTRY_ADDRESS:-127.0.0.1}
 CONTAINER_REGISTRY_PORT=${CONTAINER_REGISTRY_PORT:-5000}
+NAMESPACE=${NAMESPACE:-default}
+CLUSTER_DOMAIN=${CLUSTER_DOMAIN:-cluster.local}
+# HLF_NETWORK_DOMAIN defaults to NIP_DOMAIN (= exposed domain) inside
+# apply_coredns_override
 
 function kind_with_nginx() {
 
@@ -106,6 +110,24 @@ function start_nginx() {
       --timeout=3m
 }
 
+# coredns_endpoint_rewrites NAMESPACE HLF_NETWORK_DOMAIN CLUSTER_DOMAIN
+# One rewrite per endpoint type: <ns>-<cr>-<endpoint>.<domain> -> per-endpoint
+# Service <ns>-<cr>-<endpoint>.<ns>.svc.<cluster_domain> (MIGRATION-STEP-1 1.6).
+coredns_endpoint_rewrites() {
+  local ns="$1" domain="$2" cluster_domain="$3"
+  local domain_re="${domain//./\\.}"
+  local cluster_domain_re="${cluster_domain//./\\.}"
+  local endpoint
+  for endpoint in ca peer orderer operations grpcweb admin; do
+    printf '        rewrite stop {\n'
+    printf '            name regex ^(%s-[a-z0-9]+-%s)\\.%s\\.$ {1}.%s.svc.%s\n' \
+      "${ns}" "${endpoint}" "${domain_re}" "${ns}" "${cluster_domain}"
+    printf '            answer name ^(%s-[a-z0-9]+-%s)\\.%s\\.svc\\.%s\\.$ {1}.%s\n' \
+      "${ns}" "${endpoint}" "${ns}" "${cluster_domain_re}" "${domain}"
+    printf '        }\n'
+  done
+}
+
 #
 # Override Core DNS with a wildcard matcher for the "*.localho.st" domain, binding to the
 # IP address of the Nginx ingress controller on the kubernetes internal network.  Effectively this
@@ -120,6 +142,24 @@ function apply_coredns_override() {
   # Without this, pods resolve *.nip.io via upstream DNS which returns 127.0.0.1
   # (the pod's own loopback) instead of the nginx cluster IP.
   NIP_DOMAIN=$(echo "${KIND_API_SERVER_ADDRESS:-127.0.0.1}" | tr -s '.' '-').nip.io
+
+  # Scenario C (CA, peer and orderer unexposed, HLF network domain not
+  # cluster-local): send each endpoint name to its per-endpoint Service, not to
+  # nginx. These rules come before the wildcards: the first matching rewrite
+  # wins, and the console name matches none of them.
+  # Every regex ends with \.$ (CoreDNS names end with a dot): with ndots:5 a
+  # pod first asks <name>.<search domain>, e.g. <name>.default.svc.cluster.local.
+  # An unanchored rule answers that query too, under another name, and glibc
+  # (getaddrinfo) drops the answer and stops: "Name or service not known".
+  HLF_NETWORK_DOMAIN=${HLF_NETWORK_DOMAIN:-${NIP_DOMAIN}}
+  ENDPOINT_REWRITES=""
+  if [[ "${EXPOSE_CA:-true}" == "false" \
+     && "${EXPOSE_PEER:-true}" == "false" \
+     && "${EXPOSE_ORDERER:-true}" == "false" \
+     && "${HLF_NETWORK_DOMAIN}" != "${CLUSTER_DOMAIN}" ]]; then
+    ENDPOINT_REWRITES=$(coredns_endpoint_rewrites \
+      "${NAMESPACE}" "${HLF_NETWORK_DOMAIN}" "${CLUSTER_DOMAIN}")
+  fi
 
   cat << EOF | kubectl apply -f -
 ---
@@ -136,13 +176,14 @@ data:
            lameduck 5s
         }
         ready
-        rewrite name regex (.*)\.localho\.st host.ingress.internal
-        rewrite name regex (.*)\.${NIP_DOMAIN} host.ingress.internal
+${ENDPOINT_REWRITES}
+        rewrite name regex (.*)\.localho\.st\.$ host.ingress.internal
+        rewrite name regex (.*)\.${NIP_DOMAIN}\.$ host.ingress.internal
         hosts {
           ${CLUSTER_IP} host.ingress.internal
           fallthrough
         }
-        kubernetes cluster.local in-addr.arpa ip6.arpa {
+        kubernetes ${CLUSTER_DOMAIN} in-addr.arpa ip6.arpa {
            pods insecure
            fallthrough in-addr.arpa ip6.arpa
            ttl 30
