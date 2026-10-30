@@ -161,3 +161,6 @@ tests/output
 
 # intellij
 .idea
+
+# Runs artifacts
+tutorial/ordering-org-vars.yml

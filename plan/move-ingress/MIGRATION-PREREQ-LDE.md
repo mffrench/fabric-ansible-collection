@@ -5,6 +5,8 @@ tests on a developer workstation. It is written to work on **macOS** and
 **Linux**, under **bash** or **zsh**; platform-specific points are called out
 where they differ.
 
+**Important note : Ensure Traefik is disabled when using Rancher Desktop with Kind.**
+
 ---
 
 ## 1. Prerequisites & Environment Setup
@@ -22,7 +24,7 @@ Ensure the following tools and CLI utilities are installed and available in `$PA
    a newer one is fine.
 5. **yq**: must be **python-yq** (`pip install yq`, installed by
    `requirements.txt` inside the venv). The Go `yq` from Homebrew or apt is a
-   *different* tool and does **not** support the `yq -yi` in-place YAML writes
+   _different_ tool and does **not** support the `yq -yi` in-place YAML writes
    the test scripts rely on. `lde_preflight` (section 4.1) checks which one is
    on `PATH`.
 6. **Ansible**: installed inside the virtualenv by section 2, not system-wide.
@@ -120,10 +122,10 @@ missing. Re-run it after each of the following sections; everything should read
 
 Two of the variables it sets are easy to miss when doing this manually:
 
-| Variable | Why it is needed |
-|---|---|
-| `FABRIC_CFG_PATH` | the `peer` CLI looks for `core.yaml` there; the modules set it for their own subprocesses but not for the `peer version` start-up check |
-| `ANSIBLE_PYTHON_INTERPRETER` | `deploy-console.sh` passes `-i localhost,`, which puts localhost **in the inventory**. Ansible only equates the target interpreter with the one running `ansible-playbook` for the *implicit* localhost; with an explicit one, interpreter discovery takes over and picks a system Python with no `kubernetes` SDK |
+| Variable                     | Why it is needed                                                                                                                                                                                                                                                                                                   |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `FABRIC_CFG_PATH`            | the `peer` CLI looks for `core.yaml` there; the modules set it for their own subprocesses but not for the `peer version` start-up check                                                                                                                                                                            |
+| `ANSIBLE_PYTHON_INTERPRETER` | `deploy-console.sh` passes `-i localhost,`, which puts localhost **in the inventory**. Ansible only equates the target interpreter with the one running `ansible-playbook` for the _implicit_ localhost; with an explicit one, interpreter discovery takes over and picks a system Python with no `kubernetes` SDK |
 
 Verify the binaries resolve to the repository copy:
 
@@ -140,18 +142,21 @@ The test environment sets up a Kind cluster with an NGINX Ingress controller bou
 
 1. **Set Host API Server Address and Port**:
    On macOS Docker Desktop, use `127.0.0.1` or your host IP:
+
    ```bash
    export KIND_API_SERVER_ADDRESS="127.0.0.1"
    export KIND_API_SERVER_PORT="8888"
    ```
 
 2. **Execute the Kind bootstrap script**:
+
    ```bash
    chmod +x .github/scripts/kind_with_nginx.sh
    .github/scripts/kind_with_nginx.sh
    ```
 
 3. **Verify the cluster and ingress controller**:
+
    ```bash
    kubectl get nodes
    kubectl wait --namespace ingress-nginx \
@@ -228,7 +233,7 @@ export USE_DOCKER="false"
 - **Port 80 / 443 conflicts** — the Kind node publishes host ports 80 and 443 for
   the ingress controller. Anything else holding them makes the console
   unreachable from the host, and the symptom is misleading: requests reach the
-  *other* listener and come back `404`, as if the ingress were misconfigured.
+  _other_ listener and come back `404`, as if the ingress were misconfigured.
   Identify the holder first:
 
   ```bash
@@ -238,11 +243,11 @@ export USE_DOCKER="false"
 
   `lde_preflight` reports this as a `check` line. Common holders:
 
-  | Holder | How to free the port |
-  |---|---|
+  | Holder                                                                                                                                                                                       | How to free the port                                                                                                                                       |
+  | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
   | **Rancher Desktop** with Kubernetes enabled — its k3s runs Traefik behind a `svclb`, forwarded to the host by an `ssh` tunnel. A `CN=TRAEFIK DEFAULT CERT` in the TLS handshake confirms it. | `rdctl set --kubernetes.options.traefik=false`, or disable Kubernetes entirely in Settings → Kubernetes (Rancher Desktop still provides the Docker daemon) |
-  | Apache / httpd (macOS) | `sudo apachectl stop` |
-  | A host nginx (Linux) | `sudo systemctl stop nginx` |
+  | Apache / httpd (macOS)                                                                                                                                                                       | `sudo apachectl stop`                                                                                                                                      |
+  | A host nginx (Linux)                                                                                                                                                                         | `sudo systemctl stop nginx`                                                                                                                                |
 
 - **`Failed to import the required Python library (kubernetes)`** — Ansible is
   using the wrong interpreter. Source `lde-env.sh` (section 4.1), which pins
@@ -256,6 +261,7 @@ export USE_DOCKER="false"
   python-yq. Activate the virtualenv, or `pip install yq`.
 - **Docker Memory Limits**: Hyperledger Fabric nodes (orderers, peers, chaincode containers, couchdb) require sufficient memory. Ensure Docker Desktop has at least **8 GB RAM** allocated in **Settings > Resources**.
 - **DNS Resolution**: `*.localho.st` and `*.nip.io` domains are resolved via CoreDNS overrides in the cluster. If host resolution fails locally, verify `ping 127-0-0-1.nip.io` resolves to `127.0.0.1`.
+- **4xx error codes**: Check Traefik is disabled in your Rancher Desktop configuration.
 
 ---
 
@@ -272,19 +278,21 @@ Work through each item in order before declaring the LDE ready.
   ```
 - [ ] Operator CRDs and Console deploy without error (`deploy-console.sh` exits 0).
 - [ ] Console health endpoint responds with HTTP 200 and a JSON payload:
+
   ```bash
   source .github/scripts/lde-env.sh
   curl -sk -u "${API_KEY}:${API_SECRET}" "${API_ENDPOINT}/ak/api/v3/health" | jq 'keys'
   # Expected: ["OPTOOLS","OS"]
   ```
+
   Use **`/ak/api/v3/health`**, the path the modules call
   ([`consoles.py`](../../plugins/module_utils/consoles.py) builds it from
   `api_base_url`), and pass the credentials — it answers `401` without them.
-  `${API_ENDPOINT}/health` is *not* the API: it serves the console's HTML UI, so
+  `${API_ENDPOINT}/health` is _not_ the API: it serves the console's HTML UI, so
   piping it to `jq` fails with `Invalid numeric literal`.
 
 - [ ] The TLS certificate presented on `:443` is the console's own, proving the
-  ingress is doing SSL passthrough and no other listener has taken the port:
+      ingress is doing SSL passthrough and no other listener has taken the port:
   ```bash
   curl -sk -v "${API_ENDPOINT}/" 2>&1 | grep 'subject:'
   # Expected: CN=<namespace>-<console-name>-console.<domain>, O=ibp2-auto-gen
