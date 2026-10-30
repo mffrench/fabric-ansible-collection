@@ -14,10 +14,20 @@ channel_name: "mychannel"
 smart_contract_name: "fabcar"
 smart_contract_version: "1.0.0"
 smart_contract_sequence: 1
-smart_contract_package: "fabcar@1.0.0.tgz"
+# CCaaS package of fabcar@1.0.0.tgz, written by deploy_chaincode_server.sh:
+# the peers cannot build a chaincode themselves (docker build is disabled).
+smart_contract_package: "fabcar-ccaas@1.0.0.tgz"
 # smart_contract_constructor: "initLedger"
 # smart_contract_endorsement_policy: ""
 # smart_contract_collections_file: ""
 ca_version: ">=1.4,<2.0"
 peer_version: ">=2.2,<3.0"
+peer_state_db: leveldb
 ordering_service_version: ">=2.2,<3.0"
+# Domains (role network_domains). exposed_domain: domain of the console URL;
+# empty, the console domain passed to 00-deploy-fabric-console.yml is used.
+# hlf_network_domain: domain of the CA, peer and orderer FQDNs; empty, the
+# exposed domain. Set it to the cluster domain (cluster.local) for node FQDNs
+# that are Kubernetes Service FQDNs (scenario B).
+# exposed_domain: ""
+# hlf_network_domain: ""

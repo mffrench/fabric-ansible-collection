@@ -42,6 +42,13 @@
       msg: number of zones does not match the number of peers
   when: peer_zones is defined and (peer_zones | length != peers)
 
+- name: Compute the network domains
+  include_role:
+      name: hyperledger.fabric_ansible_collection.network_domains
+      public: true
+  vars:
+      network_domains_namespace: "{{ k8s_namespace | default('') }}"
+
 - name: Create certificate authority
   hyperledger.fabric_ansible_collection.certificate_authority:
       state: "{{ state }}"

@@ -56,4 +56,14 @@
 
 - name: Print console URL
   debug:
-    msg: IBM Blockchain Platform console available at "https://{{ namespace }}-{{ console_name }}-console.{{ console_domain }}"
+    msg: IBM Blockchain Platform console available at "{{ console_url }}"
+  when: expose_console | bool
+
+- name: Wait for the console and print how to reach it (not exposed)
+  include_role:
+    name: hyperledger.fabric_ansible_collection.network_domains
+    tasks_from: console_not_exposed
+  vars:
+    network_domains_namespace: "{{ namespace }}"
+    network_domains_console_name: "{{ console_name }}"
+  when: not expose_console | bool

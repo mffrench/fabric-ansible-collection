@@ -1,0 +1,15 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+galaxy_info:
+  author: Hyperledger Fabric contributors
+  description: Internal role that computes the domains, URLs and facts shared by the console and organization roles
+  license: Apache-2.0
+  platforms:
+    - name: GenericLinux
+      versions:
+        - all
+  galaxy_tags: []
+  min_ansible_version: "2.9"
+dependencies: []

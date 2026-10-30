@@ -1,0 +1,30 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# Inputs passed with -e (highest precedence) must not hide the computed facts.
+# run.sh calls it with:
+#   -e exposed_domain=example.com -e hlf_network_domain=cluster.local
+#   -e cluster_domain= -e expose_ca=false -e expose_peer=false -e expose_orderer=false
+- name: Test network_domains with extra vars
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Include the role
+      ansible.builtin.include_role:
+        name: hyperledger.fabric_ansible_collection.network_domains
+        public: true
+      vars:
+        network_domains_namespace: default
+        network_domains_console_name: hlf-console
+
+    - name: Check the computed facts despite the -e inputs
+      ansible.builtin.assert:
+        that:
+          - network_domains_cluster_domain == 'cluster.local'
+          - hlf_node_domain == 'default.svc.cluster.local'
+          - hlf_network_domain_is_cluster_local | bool
+        fail_msg: >-
+          cd={{ network_domains_cluster_domain }} node={{ hlf_node_domain }}
+          local={{ hlf_network_domain_is_cluster_local }}
+        success_msg: "-e inputs did not hide the computed facts."

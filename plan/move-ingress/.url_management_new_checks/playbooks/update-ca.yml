@@ -1,0 +1,20 @@
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - hyperledger.fabric_ansible_collection.certificate_authority:
+        state: present
+        api_endpoint: "{{ lookup('env','API_ENDPOINT') }}"
+        api_authtype: basic
+        api_key: "{{ lookup('env','API_KEY') }}"
+        api_secret: "{{ lookup('env','API_SECRET') }}"
+        api_timeout: 300
+        name: "{{ ca_display_name }}"
+        resources:
+          ca:
+            requests:
+              cpu: 110m
+              memory: 210M
+        wait_timeout: 20
+      register: upd
+      ignore_errors: true
+    - ansible.builtin.debug: { msg: "changed={{ upd.changed }} failed={{ upd.failed | default(false) }} {{ upd.msg | default('') }}" }

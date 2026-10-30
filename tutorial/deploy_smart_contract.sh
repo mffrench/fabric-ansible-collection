@@ -12,6 +12,9 @@ while getopts ":" OPT; do
             ;;
     esac
 done
+# The peers run the smart contract as a service (CCaaS): start its server
+# and write its package before the install playbooks.
+./deploy_chaincode_server.sh deploy
 set -x
 ansible-playbook 19-install-and-approve-chaincode.yml
 ansible-playbook 20-install-and-approve-chaincode.yml

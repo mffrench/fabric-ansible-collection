@@ -1,0 +1,47 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# Finding F1 (MIGRATION-STEP-1 sub-task 1.5): the console deployer reads its
+# domain only at startup. When the HLF node domain of an existing console
+# changes, restart the console Deployment after the CR update, and warn that
+# nodes created before keep their old domain and certificates.
+# Caller-provided: network_domains_namespace, network_domains_console_name, and
+# network_domains_live_console, the IBPConsole read before the update ({} when
+# the console did not exist). Uses the hlf_node_domain fact of tasks/main.yml.
+- name: Read the HLF node domain the running console uses
+  ansible.builtin.set_fact:
+    # Without spec.deployer.domain, the deployer uses spec.networkinfo.domain.
+    _nd_live_node_domain: >-
+      {{ (((_nd_live_spec.deployer | default({})).domain | default('', true))
+          or ((_nd_live_spec.networkinfo | default({})).domain | default('', true)))
+         | lower | regex_replace('\.$', '') }}
+  vars:
+    _nd_live_spec: "{{ network_domains_live_console.spec | default({}) }}"
+
+- name: Restart the console when its HLF node domain changed
+  when:
+    - _nd_live_node_domain != ''
+    - _nd_live_node_domain != hlf_node_domain
+  block:
+    - name: Warn that the HLF node domain changed
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: the HLF node domain of console {{ network_domains_console_name }}
+          changes from '{{ _nd_live_node_domain }}' to '{{ hlf_node_domain }}'. The
+          console is restarted so that new nodes get the new domain. Nodes created
+          before keep their names and certificates under '{{ _nd_live_node_domain }}'.
+
+    - name: Restart the console Deployment
+      kubernetes.core.k8s:
+        state: patched
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ network_domains_namespace }}"
+        name: "{{ network_domains_console_name }}"
+        definition:
+          spec:
+            template:
+              metadata:
+                annotations:
+                  kubectl.kubernetes.io/restartedAt: "{{ now(utc=true).isoformat() }}"

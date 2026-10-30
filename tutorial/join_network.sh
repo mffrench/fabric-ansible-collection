@@ -33,6 +33,7 @@ if [ "${COMMAND}" = "join" ]; then
     ansible-playbook 18-add-anchor-peer-to-channel.yml
     set +x
 elif [ "${COMMAND}" = "destroy" ]; then
+    ./deploy_chaincode_server.sh destroy || true
     set -x
     if [ "${IMPORT_EXPORT_REQUIRED}" = "1" ]; then
         ansible-playbook 97-delete-endorsing-organization-components.yml --extra-vars '{"import_export_used":true}'

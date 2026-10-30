@@ -1,0 +1,165 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# Rule tests of the network_domains role (MIGRATION-STEP-1 sub-task 1.2).
+# Needs the collection installed and a kubeconfig of a cluster whose
+# kube-system/coredns ConfigMap declares cluster.local (KIND). Run through
+# run.sh, which also runs test_extra_vars.yml.
+- name: Test the network_domains rules
+  hosts: localhost
+  gather_facts: false
+  vars:
+    noread_sa: network-domains-test-noread
+    noread_ns: default
+    # want.ok: the role succeeds. For a success: node (hlf_node_domain), local
+    # (hlf_network_domain_is_cluster_local), cd (cluster domain), and when
+    # given, read (kube-system/coredns was read) and verified (the cluster
+    # domain could be read). For a failure: err, a part of the role's message.
+    cases:
+      # Scenario A: everything exposed, nothing read from the cluster
+      - name: A, console_domain alias
+        vars: {console_domain: 127-0-0-1.nip.io}
+        want: {ok: true, node: 127-0-0-1.nip.io, local: false, cd: "", read: false}
+      - name: A, exposed_domain
+        vars: {exposed_domain: 127-0-0-1.nip.io}
+        want: {ok: true, node: 127-0-0-1.nip.io, local: false, cd: "", read: false}
+      # Scenario B: cluster-local HLF domain, nodes unexposed
+      - name: B, cluster-local
+        vars: {exposed_domain: example.com, hlf_network_domain: cluster.local, expose_console: false, expose_ca: false, expose_peer: false, expose_orderer: false}
+        want: {ok: true, node: default.svc.cluster.local, local: true, cd: cluster.local, read: true}
+      - name: B, console exposed
+        vars: {exposed_domain: example.com, hlf_network_domain: cluster.local, expose_ca: false, expose_peer: false, expose_orderer: false}
+        want: {ok: true, node: default.svc.cluster.local, local: true, cd: cluster.local, read: true}
+      # Scenario C: nodes unexposed, previous FQDNs
+      - name: C, nodes unexposed
+        vars: {exposed_domain: 127-0-0-1.nip.io, expose_console: false, expose_ca: false, expose_peer: false, expose_orderer: false}
+        want: {ok: true, node: 127-0-0-1.nip.io, local: false, cd: cluster.local, read: true}
+      # Scenario D (Step 3): nodes under their own domain
+      - name: D, external HLF domain
+        vars: {exposed_domain: example.com, hlf_network_domain: Fabric.Example.com.}
+        want: {ok: true, node: fabric.example.com, local: false, cd: cluster.local, read: true}
+      # Cluster domain set by the user
+      - name: cluster_domain matches (case and trailing dot)
+        vars: {exposed_domain: example.com, cluster_domain: Cluster.Local.}
+        want: {ok: true, node: example.com, local: false, cd: cluster.local, read: true}
+      - name: cluster_domain mismatch
+        vars: {exposed_domain: example.com, cluster_domain: corp.internal}
+        want: {ok: false, err: "does not match the cluster domain 'cluster.local'"}
+      # Validation rules
+      - name: V1, exposed_domain inside the cluster domain
+        vars: {exposed_domain: svc.cluster.local, expose_console: false}
+        want: {ok: false, err: "exposed_domain='svc.cluster.local' is inside the cluster domain"}
+      - name: V2, hlf_network_domain sub-zone of the cluster domain
+        vars: {exposed_domain: example.com, hlf_network_domain: default.svc.cluster.local, expose_ca: false, expose_peer: false, expose_orderer: false}
+        want: {ok: false, err: "set hlf_network_domain to 'cluster.local'"}
+      - name: V3, cluster-local HLF domain with an exposed peer
+        vars: {exposed_domain: example.com, hlf_network_domain: cluster.local, expose_ca: false, expose_orderer: false}
+        want: {ok: false, err: "These flags must be false: expose_peer."}
+      - name: V4, console hostname label too long
+        vars: {exposed_domain: example.com}
+        namespace: a-namespace-name-that-is-far-too-long-for-it
+        want: {ok: false, err: "is longer than 63 characters"}
+      - name: alias conflict
+        vars: {exposed_domain: a.example.com, console_domain: b.example.com}
+        want: {ok: false, err: "differ. console_domain is a deprecated alias"}
+      - name: console role without any domain
+        vars: {}
+        want: {ok: false, err: "exposed_domain (or the deprecated console_domain) is not specified"}
+      # Organization roles: no console name
+      - name: organization, nothing set (A)
+        vars: {}
+        console_name: ""
+        namespace: ""
+        want: {ok: true, node: "", local: false, cd: "", read: false}
+      - name: organization, B
+        vars: {hlf_network_domain: cluster.local, expose_ca: false, expose_peer: false, expose_orderer: false}
+        console_name: ""
+        want: {ok: true, node: default.svc.cluster.local, local: true, cd: cluster.local, read: true}
+      - name: organization, C without a domain
+        vars: {expose_ca: false, expose_peer: false, expose_orderer: false}
+        console_name: ""
+        want: {ok: false, err: "node FQDNs of unexposed components"}
+      - name: organization, B without a namespace
+        vars: {hlf_network_domain: cluster.local, expose_ca: false, expose_peer: false, expose_orderer: false}
+        console_name: ""
+        namespace: ""
+        want: {ok: false, err: "k8s_namespace (the namespace of the console and of every node) is not specified"}
+      # kube-system/coredns unreadable (ServiceAccount without the right to read it)
+      - name: ConfigMap unreadable, cluster_domain set
+        vars: {exposed_domain: 127-0-0-1.nip.io, cluster_domain: cluster.local, expose_ca: false, expose_peer: false, expose_orderer: false}
+        noread: true
+        want: {ok: true, node: 127-0-0-1.nip.io, local: false, cd: cluster.local, verified: false}
+      - name: ConfigMap unreadable, cluster_domain unset
+        vars: {exposed_domain: 127-0-0-1.nip.io, expose_ca: false, expose_peer: false, expose_orderer: false}
+        noread: true
+        want: {ok: false, err: "Could not read the cluster domain from the kube-system/coredns ConfigMap"}
+
+  tasks:
+    - name: Run the cases
+      block:
+        - name: Create a ServiceAccount that cannot read kube-system/coredns
+          kubernetes.core.k8s:
+            state: present
+            definition:
+              apiVersion: v1
+              kind: ServiceAccount
+              metadata: {name: "{{ noread_sa }}", namespace: "{{ noread_ns }}"}
+
+        - name: Get a short-lived token for it
+          ansible.builtin.command: kubectl create token {{ noread_sa }} -n {{ noread_ns }} --duration=10m
+          register: _noread_token
+          changed_when: false
+          no_log: true
+
+        - name: Read the cluster entry of the current kubeconfig
+          ansible.builtin.command: kubectl config view --raw --minify -o json
+          register: _kubeconfig
+          changed_when: false
+          no_log: true
+
+        - name: Create a temporary kubeconfig file
+          ansible.builtin.tempfile:
+            suffix: .kubeconfig
+          register: _noread_kubeconfig
+
+        - name: Write the kubeconfig of the ServiceAccount
+          ansible.builtin.copy:
+            dest: "{{ _noread_kubeconfig.path }}"
+            mode: "0600"
+            content: "{{ _noread_config | to_nice_yaml }}"
+          vars:
+            _cluster: "{{ (_kubeconfig.stdout | from_json).clusters[0] }}"
+            _noread_config:
+              apiVersion: v1
+              kind: Config
+              clusters: ["{{ _cluster }}"]
+              users: [{name: noread, user: {token: "{{ _noread_token.stdout }}"}}]
+              contexts: [{name: noread, context: {cluster: "{{ _cluster.name }}", user: noread}}]
+              current-context: noread
+          no_log: true
+
+        - name: Run each case
+          ansible.builtin.include_tasks: test_case.yml
+          loop: "{{ cases }}"
+          loop_control: {loop_var: case, label: "{{ case.name }}"}
+
+      always:
+        - name: Remove the temporary kubeconfig
+          ansible.builtin.file:
+            path: "{{ _noread_kubeconfig.path }}"
+            state: absent
+          when: _noread_kubeconfig.path is defined
+
+        - name: Delete the ServiceAccount
+          kubernetes.core.k8s:
+            state: absent
+            kind: ServiceAccount
+            name: "{{ noread_sa }}"
+            namespace: "{{ noread_ns }}"
+
+    - name: Check every case passed
+      ansible.builtin.assert:
+        that: _failed_cases | default([]) | length == 0
+        fail_msg: "{{ _failed_cases | default([]) | length }} case(s) failed: {{ _failed_cases | default([]) | join('; ') }}"
+        success_msg: "All {{ cases | length }} cases passed."

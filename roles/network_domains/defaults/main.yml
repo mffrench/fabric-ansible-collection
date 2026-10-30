@@ -1,0 +1,53 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# Inputs. Callers include this role with `public: true`, so these defaults are
+# visible to the rest of the play; user values override them as usual.
+
+# Ingress backend; only nginx is supported in Step 1.
+ingress_type: nginx
+
+# Whether each component is reachable from outside the cluster.
+expose_console: true
+expose_ca: true
+expose_peer: true
+expose_orderer: true
+expose_peer_operations: false
+expose_orderer_operations: false
+expose_grpcweb: false
+
+# Domain users see: console URL and console TLS SAN, even when not exposed.
+# Empty: falls back to the deprecated console_domain.
+exposed_domain: ""
+
+# Domain of the HLF nodes. Empty: exposed_domain (previous behaviour).
+# Set it to the cluster domain (e.g. cluster.local) for node FQDNs that are
+# Kubernetes Service FQDNs: <service>.<namespace>.svc.<cluster_domain>.
+hlf_network_domain: ""
+
+# Kubernetes cluster DNS zone. Empty: read from kube-system/coredns.
+# Set: checked against kube-system/coredns when it can be read.
+cluster_domain: ""
+
+# Ingress class served by no controller, used for unexposed components.
+unexposed_ingress_class: none
+
+# Also apply unexposed_ingress_class to the CR of each unexposed CA, peer and
+# orderer node (operator Ingress kept but not served).
+neutralize_node_ingresses: false
+
+# Gateway API settings, consumed from Step 2 on; inert in Step 1.
+gateway_class_name: fabric-envoy-gateway
+ingress_ca_port: 7054
+ingress_grpc_orderer_port: 7050
+ingress_grpc_peer_port: 7051
+
+# Caller-provided context.
+network_domains_namespace: ""
+network_domains_console_name: ""
+# Read kube-system/coredns. The role turns it on itself when the cluster
+# domain matters (see tasks/main.yml).
+network_domains_resolve_cluster_domain: false
+# URLs returned by a CA/peer/orderer module call (tasks_from: verify_urls).
+network_domains_urls: []

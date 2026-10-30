@@ -2,6 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 ---
+- name: Compute the network domains
+  include_role:
+      name: hyperledger.fabric_ansible_collection.network_domains
+      public: true
+  vars:
+      network_domains_namespace: "{{ k8s_namespace | default('') }}"
+
 - name: Delete certificate authority
   hyperledger.fabric_ansible_collection.certificate_authority:
       state: "{{ state }}"

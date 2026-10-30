@@ -153,10 +153,12 @@
   until: console_route.resources
   retries: "{{ wait_timeout }}"
   delay: 1
+  when: expose_console | bool
 
 - name: Set console URL from console ingress
   set_fact:
     console_url: "https://{{ console_route.resources[0].spec.rules[0].host }}"
+  when: expose_console | bool
 
 - name: Wait for console ingress to start
   uri:
@@ -167,7 +169,18 @@
   until: result.status == 200
   retries: "{{ wait_timeout }}"
   delay: 1
+  when: expose_console | bool
 
 - name: Print console URL
   debug:
     msg: IBM support for Hyperledger Fabric console available at {{ console_url }}
+  when: expose_console | bool
+
+- name: Wait for the console and print how to reach it (not exposed)
+  include_role:
+    name: hyperledger.fabric_ansible_collection.network_domains
+    tasks_from: console_not_exposed
+  vars:
+    network_domains_namespace: "{{ namespace }}"
+    network_domains_console_name: "{{ console }}"
+  when: not expose_console | bool

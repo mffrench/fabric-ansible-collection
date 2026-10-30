@@ -1,0 +1,155 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# Outputs are facts with names distinct from the inputs, so that an input
+# passed with -e (highest precedence) never hides a computed value:
+#   network_domains_exposed_domain, network_domains_hlf_network_domain,
+#   network_domains_cluster_domain, hlf_network_domain_is_cluster_local,
+#   hlf_node_domain, console_url, console_incluster_url
+#
+# A console role passes network_domains_console_name: the exposed domain and
+# the namespace are then mandatory. An organization role does not: with
+# everything exposed and no domain variable (the default), the domain facts
+# stay empty and nothing is read from the cluster, as before this role.
+
+- name: Resolve exposed_domain and its deprecated alias console_domain
+  ansible.builtin.set_fact:
+    _nd_exposed: "{{ exposed_domain | default('', true) | lower | regex_replace('\\.$', '') }}"
+    _nd_console: "{{ console_domain | default('', true) | lower | regex_replace('\\.$', '') }}"
+    _nd_hlf: "{{ hlf_network_domain | default('', true) | lower | regex_replace('\\.$', '') }}"
+    _nd_for_console: "{{ network_domains_console_name | length > 0 }}"
+
+- name: Fail when exposed_domain and console_domain disagree
+  ansible.builtin.fail:
+    msg: >-
+      exposed_domain='{{ _nd_exposed }}' and console_domain='{{ _nd_console }}'
+      differ. console_domain is a deprecated alias of exposed_domain: keep only
+      exposed_domain.
+  when: [_nd_exposed != '', _nd_console != '', _nd_exposed != _nd_console]
+
+- name: Warn about the deprecated console_domain
+  ansible.builtin.debug:
+    msg: >-
+      DEPRECATION: console_domain is replaced by exposed_domain and will be
+      removed with the nginx path. Using exposed_domain='{{ _nd_console }}'.
+  when: [_nd_exposed == '', _nd_console != '']
+
+- name: Set the effective exposed and HLF network domains
+  ansible.builtin.set_fact:
+    network_domains_exposed_domain: "{{ _nd_exposed or _nd_console }}"
+    network_domains_hlf_network_domain: "{{ _nd_hlf or _nd_exposed or _nd_console }}"
+
+# The cluster domain only matters when a component is unexposed or the HLF
+# network domain differs from the exposed one. Otherwise (default, scenario A)
+# no cluster access is needed.
+- name: Decide whether the cluster domain is needed
+  ansible.builtin.set_fact:
+    _nd_need_cluster_domain: >-
+      {{ network_domains_resolve_cluster_domain | bool
+         or not expose_console | bool or not expose_ca | bool
+         or not expose_peer | bool or not expose_orderer | bool
+         or network_domains_hlf_network_domain != network_domains_exposed_domain
+         or cluster_domain | default('', true) != '' }}
+
+- name: Fail when no exposed domain is given
+  ansible.builtin.fail:
+    msg: >-
+      exposed_domain (or the deprecated console_domain) is not specified or is
+      empty.{{ '' if _nd_for_console | bool else
+      ' It builds the node FQDNs of unexposed components; set it, or set
+      hlf_network_domain to the cluster domain (e.g. cluster.local).' }}
+  when:
+    - network_domains_exposed_domain == ''
+    - _nd_for_console | bool or (_nd_hlf == '' and _nd_need_cluster_domain | bool)
+
+- name: Check the namespace is provided
+  ansible.builtin.assert:
+    that: network_domains_namespace | length > 0
+    fail_msg: >-
+      {{ 'namespace (project on OpenShift) is not specified or is empty.' if _nd_for_console | bool
+         else 'k8s_namespace (the namespace of the console and of every node) is not specified or is empty.' }}
+    quiet: true
+  when: _nd_for_console | bool or _nd_need_cluster_domain | bool
+
+- name: Resolve the cluster domain
+  ansible.builtin.include_tasks: cluster_domain.yml
+  when: _nd_need_cluster_domain | bool
+
+- name: Leave the cluster domain unresolved
+  ansible.builtin.set_fact:
+    network_domains_cluster_domain: ""
+  when: not _nd_need_cluster_domain | bool
+
+- name: Fail when exposed_domain is inside the cluster domain (V1)
+  ansible.builtin.fail:
+    msg: >-
+      exposed_domain='{{ network_domains_exposed_domain }}' is inside the
+      cluster domain '{{ network_domains_cluster_domain }}'. The console URL
+      must be resolvable from outside the cluster: use an external domain.
+  when:
+    - network_domains_cluster_domain != ''
+    - network_domains_exposed_domain != ''
+    - network_domains_exposed_domain == network_domains_cluster_domain
+      or network_domains_exposed_domain.endswith('.' ~ network_domains_cluster_domain)
+
+- name: Fail when hlf_network_domain is a sub-zone of the cluster domain (V2)
+  ansible.builtin.fail:
+    msg: >-
+      hlf_network_domain='{{ network_domains_hlf_network_domain }}' is inside the
+      cluster domain '{{ network_domains_cluster_domain }}'. For in-cluster node
+      FQDNs, set hlf_network_domain to '{{ network_domains_cluster_domain }}':
+      the role then builds <service>.<namespace>.svc.{{ network_domains_cluster_domain }} itself.
+  when:
+    - network_domains_cluster_domain != ''
+    - network_domains_hlf_network_domain != network_domains_cluster_domain
+    - network_domains_hlf_network_domain.endswith('.' ~ network_domains_cluster_domain)
+
+- name: Set the HLF network facts
+  ansible.builtin.set_fact:
+    hlf_network_domain_is_cluster_local: >-
+      {{ network_domains_cluster_domain != ''
+         and network_domains_hlf_network_domain == network_domains_cluster_domain }}
+
+- name: Set the HLF node domain
+  ansible.builtin.set_fact:
+    hlf_node_domain: >-
+      {{ (network_domains_namespace ~ '.svc.' ~ network_domains_cluster_domain)
+         if hlf_network_domain_is_cluster_local | bool
+         else network_domains_hlf_network_domain }}
+
+- name: Fail when a cluster-local HLF domain is combined with exposed nodes (V3)
+  ansible.builtin.fail:
+    msg: >-
+      hlf_network_domain='{{ network_domains_hlf_network_domain }}' is the
+      cluster domain: node FQDNs cannot be resolved from outside the cluster.
+      These flags must be false: {{ _nd_exposed_nodes | join(', ') }}.
+      expose_console may stay true (the console uses exposed_domain).
+  vars:
+    _nd_exposed_nodes: >-
+      {{ (['expose_ca'] if expose_ca | bool else [])
+         + (['expose_peer'] if expose_peer | bool else [])
+         + (['expose_orderer'] if expose_orderer | bool else []) }}
+  when:
+    - hlf_network_domain_is_cluster_local | bool
+    - _nd_exposed_nodes | length > 0
+
+- name: Set the console facts
+  ansible.builtin.set_fact:
+    console_url: >-
+      https://{{ network_domains_namespace }}-{{ network_domains_console_name }}-console.{{ network_domains_exposed_domain }}
+    # Empty when the cluster domain was not resolved (everything exposed): nothing uses it then.
+    console_incluster_url: >-
+      {{ ('https://' ~ network_domains_console_name ~ '.' ~ network_domains_namespace
+          ~ '.svc.' ~ network_domains_cluster_domain ~ ':3000')
+         if network_domains_cluster_domain != '' else '' }}
+  when: _nd_for_console | bool
+
+- name: Check the console hostname label length (V4)
+  ansible.builtin.assert:
+    that: (network_domains_namespace ~ '-' ~ network_domains_console_name ~ '-console') | length <= 63
+    fail_msg: >-
+      '{{ network_domains_namespace }}-{{ network_domains_console_name }}-console'
+      is longer than 63 characters: shorten the namespace or the console name.
+    quiet: true
+  when: _nd_for_console | bool

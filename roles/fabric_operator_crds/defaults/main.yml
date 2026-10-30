@@ -43,7 +43,6 @@ fabric_orderer_image: "{{ orderer_image }}:{{ orderer_image_label }}"
 fabric_tools_image: "{{ tools_image }}:{{ tools_image_label }}"
 
 # test_network_ingress_ipaddr: "172.17.154.105"
-ingress_domain: localho.st
 container_cli: docker
 container_namespace: ""
 storage_class: standard

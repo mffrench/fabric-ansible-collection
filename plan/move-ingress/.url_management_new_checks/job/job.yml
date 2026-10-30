@@ -1,0 +1,19 @@
+apiVersion: batch/v1
+kind: Job
+metadata: {name: ansible-runner, namespace: default}
+spec:
+  backoffLimit: 0                 # a failed run must fail the CI step, not retry
+  activeDeadlineSeconds: 3600
+  template:
+    spec:
+      serviceAccountName: ansible-runner
+      restartPolicy: Never
+      containers:
+        - name: runner
+          image: ansible-runner:ci
+          imagePullPolicy: Never  # loaded with `kind load docker-image`
+          envFrom:
+            - configMapRef: {name: ansible-runner-env}   # created by the CI step below
+          env:
+            - name: API_SECRET
+              valueFrom: {secretKeyRef: {name: ansible-runner-auth, key: API_SECRET}}

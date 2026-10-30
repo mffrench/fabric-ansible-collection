@@ -1,2 +1,4 @@
 *.json
 *.bin
+# CCaaS package written by deploy_chaincode_server.sh
+fabcar-ccaas@*.tgz

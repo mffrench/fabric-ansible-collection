@@ -1,0 +1,35 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# expose_console: false (MIGRATION-STEP-1 sub-task 1.4). The console Ingress
+# is not served, so readiness is the Deployment's Available condition, and the
+# user is told where the console is and how to expose it later.
+# Caller-provided: network_domains_namespace, network_domains_console_name.
+# Uses the console_url and console_incluster_url facts of tasks/main.yml.
+- name: Wait for console Deployment to be Available
+  kubernetes.core.k8s_info:
+    namespace: "{{ network_domains_namespace }}"
+    api_version: apps/v1
+    kind: Deployment
+    name: "{{ network_domains_console_name }}"
+  register: _nd_console_deployment
+  until: >-
+    _nd_console_deployment.resources | length > 0
+    and (_nd_console_deployment.resources[0].status.conditions | default([])
+         | selectattr('type', 'equalto', 'Available')
+         | selectattr('status', 'equalto', 'True') | list | length > 0)
+  retries: "{{ wait_timeout | default(600) }}"
+  delay: 1
+
+- name: Print console exposition notice
+  ansible.builtin.debug:
+    msg:
+      - "Console URL (not exposed): {{ console_url }}"
+      - "Reachable in-cluster at: {{ console_incluster_url }}"
+      - >-
+        To expose it, route the console URL to Service
+        {{ network_domains_console_name }} port 3000 in namespace
+        {{ network_domains_namespace }}, with TLS passthrough (for example an
+        nginx Ingress with ssl-passthrough, or a Gateway API TLSRoute), or run
+        again with expose_console: true.

@@ -1,0 +1,68 @@
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+---
+# One case of test.yml. A templated `set_fact: "{{ dict }}"` is a silent no-op
+# in ansible-core 2.18, so each input is set explicitly (unset = role default).
+- name: Set the case inputs and reset the outputs of the previous case
+  ansible.builtin.set_fact:
+    exposed_domain: "{{ case.vars.exposed_domain | default('') }}"
+    console_domain: "{{ case.vars.console_domain | default('') }}"
+    hlf_network_domain: "{{ case.vars.hlf_network_domain | default('') }}"
+    cluster_domain: "{{ case.vars.cluster_domain | default('') }}"
+    expose_console: "{{ case.vars.expose_console | default(true) }}"
+    expose_ca: "{{ case.vars.expose_ca | default(true) }}"
+    expose_peer: "{{ case.vars.expose_peer | default(true) }}"
+    expose_orderer: "{{ case.vars.expose_orderer | default(true) }}"
+    network_domains_cluster_domain: ""
+    hlf_node_domain: ""
+    hlf_network_domain_is_cluster_local: false
+    console_url: ""
+    console_incluster_url: ""
+    _nd_coredns_cm: not-read
+    _nd_found_cd: not-read
+    _ok: false
+    _err: ""
+
+- name: "Run network_domains: {{ case.name }}"
+  environment: "{{ {'KUBECONFIG': _noread_kubeconfig.path, 'K8S_AUTH_KUBECONFIG': _noread_kubeconfig.path}
+                   if case.noread | default(false) else {} }}"
+  block:
+    - name: Include the role
+      ansible.builtin.include_role:
+        name: hyperledger.fabric_ansible_collection.network_domains
+        public: true
+      vars:
+        network_domains_namespace: "{{ case.namespace | default('default') }}"
+        network_domains_console_name: "{{ case.console_name | default('hlf-console') }}"
+    - name: Record success
+      ansible.builtin.set_fact:
+        _ok: true
+  rescue:
+    - name: Record failure
+      ansible.builtin.set_fact:
+        _err: "{{ ansible_failed_result.msg | default('') }}"
+
+- name: "Compare with the expected outcome: {{ case.name }}"
+  ansible.builtin.set_fact:
+    _pass: >-
+      {{ (_ok | bool) == case.want.ok
+         and (_ok | bool
+                and hlf_node_domain == case.want.node
+                and (hlf_network_domain_is_cluster_local | bool) == case.want.local
+                and network_domains_cluster_domain == case.want.cd
+                and (case.want.read is not defined or (_nd_coredns_cm != 'not-read') == case.want.read)
+                and (case.want.verified is not defined or (_nd_found_cd != '') == case.want.verified)
+              or not _ok | bool and case.want.err in _err) }}
+
+- name: "Result: {{ case.name }}"
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'PASS' if _pass | bool else 'FAIL' }} | {{ case.name }} |
+      {% if _ok | bool %}node={{ hlf_node_domain }} local={{ hlf_network_domain_is_cluster_local }}
+      cd={{ network_domains_cluster_domain }} read={{ _nd_coredns_cm != 'not-read' }}{% else %}failed: {{ _err | truncate(150) }}{% endif %}
+
+- name: Record a failed case
+  ansible.builtin.set_fact:
+    _failed_cases: "{{ _failed_cases | default([]) + [case.name] }}"
+  when: not _pass | bool

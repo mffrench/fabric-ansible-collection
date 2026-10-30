@@ -7,10 +7,13 @@
     msg: arch not specified or is not one of "amd64" or "s390x"
   when: not arch is defined or not arch in ("amd64", "s390x")
 
-- name: Fail if console domain not specified
-  fail:
-    msg: console_domain not specified or is empty
-  when: not console_domain is defined or not console_domain
+- name: Compute the network domains
+  include_role:
+    name: hyperledger.fabric_ansible_collection.network_domains
+    public: true
+  vars:
+    network_domains_namespace: "{{ project | default(namespace) }}"
+    network_domains_console_name: "{{ console }}"
 
 - name: Fail if console email not specified
   fail:

@@ -1,0 +1,10 @@
+- hosts: localhost
+  gather_facts: false
+  tasks:
+    - hyperledger.fabric_ansible_collection.certificate_authority:
+        state: absent
+        api_endpoint: "{{ lookup('env','API_ENDPOINT') }}"
+        api_authtype: basic
+        api_key: "{{ lookup('env','API_KEY') }}"
+        api_secret: "{{ lookup('env','API_SECRET') }}"
+        name: "{{ ca_display_name }}"
