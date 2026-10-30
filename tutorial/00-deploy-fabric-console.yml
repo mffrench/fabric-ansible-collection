@@ -8,6 +8,7 @@
     - common-vars.yml
   vars:
     state: present
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
     target: "{{ k8s_target | default('k8s') }}"
     arch: "{{ console_arch | default('amd64') }}"
     namespace: "{{ k8s_namespace | default('default') }}"
