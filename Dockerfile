@@ -19,7 +19,9 @@ RUN microdnf install -y gcc gzip python-devel tar \
     && microdnf clean -y all
 USER hlf-user
 ENV PATH=/home/hlf-user/.local/bin:$PATH
-RUN pip3.9 install --user -U 'ansible' fabric-sdk-py python-pkcs11 'openshift' semantic_version jmespath \
+# cryptography as in requirements.txt: with the latest one, fabric-sdk-py fails
+# to enroll ("curve must be an EllipticCurve instance").
+RUN pip3.9 install --user -U 'ansible' fabric-sdk-py python-pkcs11 'openshift' semantic_version jmespath 'cryptography==42.0.8' \
     && chgrp -R root /home/hlf-user/.local \
     && chmod -R g=u /home/hlf-user/.local
 ADD . /tmp/collection

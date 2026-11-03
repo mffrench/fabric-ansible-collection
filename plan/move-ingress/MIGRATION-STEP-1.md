@@ -2819,23 +2819,39 @@ this plan.)
   (the operator always creates them) with class `none` for the console, and
   for the nodes when `neutralize_node_ingresses: true`.
 - Added to the `toctree` in `docs/source/index.rst`.
-- `make -C docs html` builds without warnings.
+- `make -C docs` (the Makefile has no `html` target) builds without a new
+  warning.
 
 **Todo list:**
-- [ ] Create `docs/source/tutorials/nginx-no-expose.rst` with:
-  - Prerequisites section (nginx ingress controller installed but routes not
-    required for in-cluster use).
-  - Example vars file for scenario B (above) and `ingress_type: nginx`.
-  - Step-by-step playbook execution using `ansible-playbook -e @no-expose-vars.yml`.
+- [x] Create `docs/source/tutorials/nginx-no-expose.rst` ("Exposing nothing
+  with the nginx ingress controller", sibling of the 1.11 page) with:
+  - Prerequisites section ("Requirements of this setup": the nginx ingress
+    controller is only needed to expose the console later).
+  - Example vars file for scenario B (above), `ingress_type: nginx` and
+    `k8s_namespace`.
+  - Step-by-step playbook execution using `ansible-playbook -e @no-expose-vars.yml`:
+    the console from the user's computer (`install-oss.yml` of
+    `oss-installing.rst`, without its `console_domain` line), the
+    organization playbooks in a pod, one `ansible-playbook` per playbook of
+    `build_network.sh build`.
   - Verification: console notice message in the playbook output; console
     URL through nginx returns 404; `console_incluster_url` answers from a
-    pod.
+    pod (`401` without credentials); `kubectl get ingress`; one Service per
+    endpoint and `/healthz` through it.
   - Requirement: the organization playbooks must run inside the cluster
     (sub-task 1.9) because node FQDNs only resolve there.
   - Explanation of when to use this scenario (single-cluster bootstrap, GitOps
-    lead-org setup, development environment).
-- [ ] Add `nginx-no-expose` to the `toctree` in `docs/source/index.rst`.
-- [ ] Run `make -C docs html` and fix any warnings.
+    lead-org setup, development environment), and when not to (organizations
+    in different clusters).
+  - Also: `neutralize_node_ingresses`, exposing the console later (role
+    re-run or nginx Ingress by hand; Gateway API `TLSRoute` named only),
+    copying the identities out of the pod, removing the network.
+- [x] Add `nginx-no-expose` to the `toctree` in `docs/source/index.rst`,
+  after `tutorials/building` (the page reuses its playbooks). 1.11 inserts
+  its line before `tutorials/building`: the two changes are not adjacent,
+  so they merge without conflict.
+- [x] Build the docs and fix the warnings the page adds: none (211 before
+  and after, all pre-existing).
 
 **Relevant context:**
 - Why run everything in-cluster (PRE-ANALYSIS.md topology A): PRE-ANALYSIS.md
@@ -2843,16 +2859,51 @@ this plan.)
 - Console notice message implementation: sub-task 1.4 above.
 - In-cluster console URL: `console_incluster_url`,
   `https://<console>.<namespace>.svc.<cluster_domain>:3000`.
+- **How the page runs the organization playbooks in the cluster.** Not the
+  Job of 1.9, which runs the test script with a test-only image: a pod of
+  the collection image (`sleep infinity`), with the ServiceAccount and the
+  rights of the 1.9 runner, and `kubectl exec`. The reader runs the
+  playbooks one by one and must copy the identities out of the pod before
+  deleting it (`kubectl exec ... cat`).
+  - The image has no `tar`, so `kubectl cp` fails: the pod clones the
+    playbooks with `git` at the version of the image.
+  - The variables go in a Secret mounted at `/vars`, as two files passed
+    with `-e @`: `no-expose-vars.yml` (scenario, also used for the
+    console) and `in-cluster-vars.yml` (console connection through
+    `console_incluster_url`). Extra variables override the organization
+    variables files of the tutorial, so no tutorial file is edited: both
+    organizations use the same console. A Secret cannot hold the whole
+    `tutorial` directory: `Org1 Gateway.json` is not a valid key.
+- **`Dockerfile` (root) changed.** The collection image installed the
+  latest `cryptography` (50.0.2 on 2026-11-03), and fabric-sdk-py then fails
+  to enroll (`curve must be an EllipticCurve instance`, the error 1.9 fixed
+  in its test-only image). The pin of `requirements.txt`
+  (`cryptography==42.0.8`) is added to the image's `pip install`. No other
+  sub-task changes this file. The 1.9 runner image keeps its own pin, now
+  redundant.
+- **The node Ingress objects stay served in scenario B** unless
+  `neutralize_node_ingresses: true`: their hosts are Service FQDNs, which no
+  outside client resolves, but a client that sends one of them to nginx
+  reaches the node (checked with `curl --resolve`). The page says so.
+- `docs/Makefile` has no `html` target (see 1.11): `make -C docs clean &&
+  make -C docs`.
 
 ### ✋  check 1.12
 
 **Proves:** the page builds, is reachable from the index, and lets a reader
 reproduce scenario B.
 
-1. `make -C docs html 2>&1 | grep -iE 'warning|error'`: no output;
-   `nginx-no-expose` appears in the navigation.
+1. A clean build adds no warning:
+   ```bash
+   make -C docs clean && make -C docs 2>&1 | grep -E 'WARNING|ERROR|build succeeded'
+   ```
+   Expected: the same `N warnings` as this command gives at `$BASE`, and
+   no `WARNING` line naming `nginx-no-expose.rst` or `index.rst`;
+   `nginx-no-expose` appears in the navigation
+   (`grep nginx-no-expose docs/build/index.html`).
 2. Someone who did not write the page follows it on a fresh KIND cluster,
-   with the playbooks running in-cluster (the Job of 1.9). Expected, as the
+   with the playbooks running in-cluster (the pod of the page, an image
+   built from this branch and `kind load`). Expected, as the
    page says: the console notice in the output; the console URL through
    nginx answers `404`; `console_incluster_url` answers from a pod (`401`
    without credentials); `kubectl get ingress -n default` shows class `none`
@@ -2872,6 +2923,53 @@ reproduce scenario B.
    raise a warning in the PR description: 1.12 must be merged before
    or after that sub-task (for example 1.10), not at the same time.
    In both cases, add the file to the 1.12 row of the table.
+
+**Checked on 2026-11-03** (local arm64 KIND, branch on top of 1.9), by the
+author of the page: step 2 must still be done by someone else.
+- Step 1: 211 warnings at the base and with the page, the same lines; none
+  names the page or `index.rst`. The page is in the navigation, and its
+  internal links resolve.
+- Step 2, every command of the page, in order, with these substitutions:
+  namespace `default`, `exposed_domain: 127-0-0-1.nip.io`, `arch: arm64`
+  in `install-oss.yml`, image `fabric-ansible:1.12-check` built from this
+  branch and loaded with `kind load`, and the clone of the fork at the 1.9
+  branch instead of hyperledger-labs at `<version>` (same playbooks).
+  - Console from the laptop: `failed=0`, the notice printed as on the page.
+  - Organization playbooks in the pod: 7 `PLAY RECAP` with `failed=0`; the
+    4 identities copied out of the pod.
+  - Checks of the page: console URL through nginx `404`; in-cluster console
+    URL `401` without credentials; `kubectl get ingress`: class `none` for
+    the console, `nginx` for the 4 nodes, every node host under
+    `.default.svc.cluster.local`; 11 Services; `/healthz` of the peer
+    through its Service answers `{"status":"OK",...}`.
+  - Every URL the console returns for the 6 components (13 URLs) is under
+    `.default.svc.cluster.local`.
+  - Through nginx with `curl --resolve`, a node name reaches the node (the
+    peer's `/healthz` JSON). After `neutralize_node_ingresses: true`
+    (Secret updated, seen by the pod after about 25 s, playbooks 01 and 02
+    run again, `failed=0`): class `none` everywhere, and nginx answers
+    itself, with its fake certificate. Its own `/healthz` returns `200`
+    with an empty body for any host: check the body, not the status code.
+  - Console exposed by hand (nginx Ingress of the page): the URL answers
+    `401`, with a certificate for `default-hlf-console-console.127-0-0-1.nip.io`;
+    `404` again after deleting the Ingress. Exposed by the role
+    (`-e expose_console=true`): `failed=0`, class `nginx`, `401`.
+  - Removal: 97 and 99 with `failed=0`; no CA, peer or orderer CR and no
+    Service left; pod, rights and Secret deleted.
+  - No credential in the logs of the check.
+- Step 3: the page names scenario B once and never scenario A.
+- Step 4: besides the files of 1.9 (base not merged yet), this branch
+  changes `Dockerfile`, `docs/source/index.rst`, the page and the two plan
+  files: the 1.12 row of the table. 1.10 and 1.11 do not change
+  `Dockerfile`. A simulated merge of `index.rst` with the 1.11 branch has
+  no conflict, nor of the two plan files with the 1.10 and 1.11 branches.
+- **Found, not fixed (outside 1.12):** the `fabric_console` role, used by
+  `install-oss.yml` of the installation tutorial, limits CouchDB to
+  `1000Mi` in its template. On this cluster CouchDB was `OOMKilled` in a
+  loop, and the console never became ready. `00-deploy-fabric-console.yml`
+  (CI) sets `2Gi`. For the check, the limit was raised to `2Gi` on the
+  `IBPConsole` by hand, twice: the role puts `1000Mi` back each time it
+  runs. Scenario A has the same problem: it does not come from Step 1.
 
 
 ---

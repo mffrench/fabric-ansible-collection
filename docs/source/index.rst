@@ -46,6 +46,7 @@ This Ansible collection is maintained by the IBM Blockchain development team.
    tutorials/hlfsupport-installing
    tutorials/nginx-expose-all
    tutorials/building
+   tutorials/nginx-no-expose
    tutorials/joining
    tutorials/certificate-management
    tutorials/deploying

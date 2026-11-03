@@ -30,7 +30,7 @@ A sub-task can need another one for three different reasons:
 | 1.9 CI legs and Job | `.github/workflows/fvtest.yml`; `.github/docker/ansible-runner/Dockerfile` (new); `.github/k8s/ansible-runner-{rbac,job}.yml` (new); `.github/scripts/wait-job.sh` (new, fail-fast Job wait); `tutorial/deploy_chaincode_server.sh` (`CCAAS_PACKAGE_ONLY`: the Job only writes the chaincode package); `plan/move-ingress/MIGRATION-STEP-1.md` (1.9 text only) |
 | 1.10 reachability assertions | `.github/scripts/verify-unexposed-reachability.sh` (new); `.github/workflows/fvtest.yml` (one step); `plan/move-ingress/MIGRATION-STEP-1.md` (1.10 text only) |
 | 1.11 tutorial, everything exposed | `docs/source/tutorials/nginx-expose-all.rst` (new); `docs/source/tutorials/{oss,hlfsupport}-installing.rst` (a pointer paragraph each); `docs/source/index.rst` (one line); `plan/move-ingress/MIGRATION-STEP-1.md` (1.11 text only) |
-| 1.12 tutorial, nothing exposed | `docs/source/tutorials/nginx-no-expose.rst` (new); `docs/source/index.rst` (one line) |
+| 1.12 tutorial, nothing exposed | `docs/source/tutorials/nginx-no-expose.rst` (new); `docs/source/index.rst` (one line, after `tutorials/building`); `Dockerfile` (`cryptography` pin: the tutorial runs the organization playbooks in a pod of the collection image, which could not enroll); `plan/move-ingress/MIGRATION-STEP-1.md` (1.12 text only) |
 
 ## Files shared by several sub-tasks
 
